@@ -3,13 +3,14 @@ version: '3.8'
 services:
   process-exporter:
     build: .
-    ports:
-      - "9105:9105"
+    network_mode: host
     privileged: true
     pid: host
     volumes:
       - /sys/fs/cgroup:/sys/fs/cgroup:ro
       - /proc:/host/proc:ro
+      - /etc/hostname:/host/etc/hostname:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
     environment:
       - PROC_DIR=/host/proc
       - CGROUP_DIR=/sys/fs/cgroup

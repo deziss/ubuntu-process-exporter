@@ -1,11 +1,11 @@
 # Cgroup- & Container-Aware Prometheus Process Exporter
 
-This exporter collects process metrics from a Linux system, with awareness of cgroups and containers (Docker, containerd, Kubernetes).
+This exporter collects process metrics from a Linux system, with awareness of cgroups and containers (Docker, containerd, Kubernetes, Podman, LXC, etc.).
 
 ## Features
 
 - Top processes by memory, CPU, disk read/write
-- Container detection and metadata extraction
+- Container detection and metadata extraction for multiple runtimes
 - Cgroup v2 support
 - UID and username inclusion
 - Short command names (not full paths)
@@ -36,12 +36,13 @@ Data flow:
 - `uid`: User ID
 - `user`: Username
 - `command`: Short command name
-- `runtime`: Runtime (host, docker, etc.)
+- `runtime`: Runtime (host, docker, containerd, kubernetes, podman, lxc, etc.)
 - `rank`: Rank in top list
-- `ip`: IP address (if listening)
 - `port`: Port (if listening)
 - `container_id`: Container ID
 - `container_name`: Container name
+- `hostname`: Hostname of the system
+- `uptime`: Process uptime in seconds
 
 ## Configuration
 
@@ -79,7 +80,7 @@ docker run -d --name process-exporter \
 
 To include all labels (default), omit the `INCLUDE_LABELS` environment variable.
 
-Available labels: pid, uid, user, command, runtime, rank, ip, port, container_id, container_name
+Available labels: pid, uid, user, command, runtime, rank, container_id, container_name, hostname, uptime
 
 ## Docker Deployment
 

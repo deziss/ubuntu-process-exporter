@@ -24,6 +24,7 @@ class ProcessMetric:
     ip: Optional[str]
     port: Optional[str]
     cgroup_path: str
+    uptime: int
     # Additional fields for later
     runtime: str = "host"
     container_id: str = ""
@@ -34,12 +35,16 @@ class ProcessMetric:
 
 # Task 3.1: Container Runtime Detection
 def detect_runtime(cgroup_path: str) -> str:
-    if 'docker' in cgroup_path:
+    if 'kubepods' in cgroup_path:
+        return 'kubernetes'
+    elif 'docker' in cgroup_path:
         return 'docker'
     elif 'cri-containerd' in cgroup_path or 'containerd' in cgroup_path:
         return 'containerd'
-    elif 'kubepods' in cgroup_path:
-        return 'kubernetes'
+    elif 'libpod' in cgroup_path:
+        return 'podman'
+    elif 'lxc' in cgroup_path:
+        return 'lxc'
     elif cgroup_path.startswith('/user.slice') or cgroup_path.startswith('/system.slice'):
         return 'systemd'
     else:
@@ -48,25 +53,69 @@ def detect_runtime(cgroup_path: str) -> str:
 # Task 3.2: Container ID Extraction
 def extract_container_id(cgroup_path: str, runtime: str) -> str:
     if runtime == 'docker':
+        # Try different patterns
         match = re.search(r'docker/([a-f0-9]{64})', cgroup_path)
         if match:
-            return match.group(1)[:12]  # Short ID
+            return match.group(1)[:12]
+        match = re.search(r'docker/([a-f0-9]{12})', cgroup_path)
+        if match:
+            return match.group(1)
+        match = re.search(r'/docker-([a-f0-9]+)\.scope', cgroup_path)
+        if match:
+            return match.group(1)[:12]
     elif runtime == 'containerd':
         match = re.search(r'cri-containerd-([a-f0-9]+)', cgroup_path)
         if match:
             return match.group(1)[:12]
     elif runtime == 'kubernetes':
-        # For k8s, container ID might be in different places, but for simplicity
+        # For k8s with containerd: .../cri-containerd-<id>.scope
+        match = re.search(r'cri-containerd-([a-f0-9]+)', cgroup_path)
+        if match:
+            return match.group(1)[:12]
+        # For k8s with docker: .../docker-<id>.scope
+        match = re.search(r'docker-([a-f0-9]+)', cgroup_path)
+        if match:
+            return match.group(1)[:12]
+        # Fallback: extract any id from kubepods path
+        match = re.search(r'kubepods/[^/]+/pod[^/]+/([a-f0-9]+)', cgroup_path)
+        if match:
+            return match.group(1)[:12]
         return 'unknown'
+    elif runtime == 'podman':
+        match = re.search(r'libpod-([a-f0-9]+)', cgroup_path)
+        if match:
+            return match.group(1)[:12]
+        match = re.search(r'/libpod-([a-f0-9]+)\.scope', cgroup_path)
+        if match:
+            return match.group(1)[:12]
+    elif runtime == 'lxc':
+        match = re.search(r'lxc/([^/]+)', cgroup_path)
+        if match:
+            return match.group(1)
     return ''
 
 # Task 3.3: Container Metadata Resolution
 @lru_cache(maxsize=128)
 def resolve_container_metadata(container_id: str, runtime: str) -> Dict[str, str]:
-    if not container_id or runtime not in ['docker', 'containerd']:
+    if not container_id:
         return {'container_name': '', 'pod_name': '', 'namespace': ''}
 
     if runtime == 'docker':
+        # Find the container dir (full id)
+        containers_dir = '/var/lib/docker/containers'
+        if os.path.exists(containers_dir):
+            for d in os.listdir(containers_dir):
+                if d.startswith(container_id):
+                    config_path = os.path.join(containers_dir, d, 'config.v2.json')
+                    if os.path.exists(config_path):
+                        try:
+                            with open(config_path, 'r') as f:
+                                config = json.load(f)
+                                name = config.get('Name', '').lstrip('/')
+                                return {'container_name': name, 'pod_name': '', 'namespace': ''}
+                        except:
+                            pass
+        # Fallback: try direct
         config_path = f'/var/lib/docker/containers/{container_id}/config.v2.json'
         if os.path.exists(config_path):
             try:
@@ -76,11 +125,22 @@ def resolve_container_metadata(container_id: str, runtime: str) -> Dict[str, str
                     return {'container_name': name, 'pod_name': '', 'namespace': ''}
             except:
                 pass
+    elif runtime == 'podman':
+        try:
+            result = subprocess.run(['podman', 'inspect', container_id, '--format', '{{.Name}}'], capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                name = result.stdout.strip()
+                return {'container_name': name, 'pod_name': '', 'namespace': ''}
+        except:
+            pass
+    elif runtime == 'lxc':
+        # For LXC, container_id is the name
+        return {'container_name': container_id, 'pod_name': '', 'namespace': ''}
     # For containerd and k8s, more complex, placeholder
     return {'container_name': '', 'pod_name': '', 'namespace': ''}
 
 # Task 4.1 & 4.2: Top-N Aggregation
-def get_top_n(processes, key_func, n=20):
+def get_top_n(processes, key_func, n=50):
     sorted_processes = sorted(processes, key=key_func, reverse=True)
     top = sorted_processes[:n]
     for rank, p in enumerate(top, 1):
@@ -114,10 +174,10 @@ def collect_data():
         if not line.strip():
             continue
         parts = line.split('\t')
-        if len(parts) != 11:
+        if len(parts) != 12:
             print(f"Invalid line: {line}", file=sys.stderr)
             continue
-        pid, uid, user, pcpu, rss, comm, disk_read, disk_write, ip, port, cgroup_path = parts
+        pid, uid, user, pcpu, rss, etimes, comm, disk_read, disk_write, ip, port, cgroup_path = parts
         pm = ProcessMetric(
             pid=int(pid),
             uid=int(uid),
@@ -129,7 +189,8 @@ def collect_data():
             disk_write_bytes=int(disk_write),
             ip=ip,
             port=port,
-            cgroup_path=cgroup_path
+            cgroup_path=cgroup_path,
+            uptime=int(etimes)
         )
         # Detect runtime
         pm.runtime = detect_runtime(pm.cgroup_path)

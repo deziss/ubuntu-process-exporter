@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # collector.sh: Raw Data Collection
-# Output: tab-separated lines: pid user pcpu rss comm disk_read disk_write ip port cgroup
+# Output: tab-separated lines: pid uid user pcpu rss etimes comm disk_read disk_write ip port cgroup
 
 set -e
 
@@ -10,22 +10,19 @@ CGROUP_DIR=${CGROUP_DIR:-/sys/fs/cgroup}
 
 # Collect network data
 declare -A pid_networks
-while read -r line; do
-    pid=$(echo "$line" | grep -o 'pid=[0-9]*' | cut -d= -f2)
-    if [ -n "$pid" ]; then
-        local_addr=$(echo "$line" | awk '{print $5}')
-        ip=$(echo "$local_addr" | cut -d: -f1 | sed 's/\[//;s/\]//')
-        port=$(echo "$local_addr" | cut -d: -f2- | cut -d: -f1)
+lsof -i -P -n 2>/dev/null | grep LISTEN | while read -r command pid user fd type device size_off node name; do
+    if [[ $name == *:* ]]; then
+        port=$(echo "$name" | cut -d: -f2)
         if [ -z "${pid_networks[$pid]}" ]; then
-            pid_networks[$pid]="$ip:$port"
+            pid_networks[$pid]=":$port"
         else
-            pid_networks[$pid]="${pid_networks[$pid]},$ip:$port"
+            pid_networks[$pid]="${pid_networks[$pid]},:$port"
         fi
     fi
-done < <(ss -tunp 2>/dev/null | grep 'pid=')
+done
 
 # Get process info
-ps -eo pid,uid,user,pcpu,rss,comm --no-headers | while read -r pid uid user pcpu rss comm; do
+ps -eo pid,uid,user,pcpu,rss,etimes,comm --no-headers | while read -r pid uid user pcpu rss etimes comm; do
     # Disk I/O
     disk_read_bytes=0
     disk_write_bytes=0
@@ -51,5 +48,5 @@ ps -eo pid,uid,user,pcpu,rss,comm --no-headers | while read -r pid uid user pcpu
     fi
 
     # Output tab separated
-    echo "$pid	$uid	$user	$pcpu	$rss	$comm	$disk_read_bytes	$disk_write_bytes	$ip	$port	$cgroup_path"
+    echo "$pid	$uid	$user	$pcpu	$rss	$etimes	$comm	$disk_read_bytes	$disk_write_bytes	$ip	$port	$cgroup_path"
 done

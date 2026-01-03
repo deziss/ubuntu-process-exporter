@@ -3,12 +3,21 @@
 import time
 import sys
 import os
+import socket
+import subprocess
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from prometheus_client import Gauge, generate_latest, CONTENT_TYPE_LATEST
 from collector import collect_data, aggregate_top
 
+# Get host hostname
+try:
+    with open('/host/etc/hostname', 'r') as f:
+        hostname = f.read().strip()
+except:
+    hostname = socket.gethostname()
+
 # Dynamic labels configuration
-ALL_LABELS = ['pid', 'uid', 'user', 'command', 'runtime', 'rank', 'ip', 'port', 'container_id', 'container_name']
+ALL_LABELS = ['pid', 'uid', 'user', 'command', 'runtime', 'rank', 'port', 'container_id', 'container_name', 'hostname', 'uptime']
 include_labels_env = os.getenv('INCLUDE_LABELS', '')
 if include_labels_env:
     include_labels = [l.strip() for l in include_labels_env.split(',') if l.strip()]
@@ -30,10 +39,11 @@ def get_labels_dict(p, labelnames):
         'command': p.command,
         'runtime': p.runtime,
         'rank': str(p.rank),
-        'ip': p.ip,
         'port': p.port,
         'container_id': p.container_id,
-        'container_name': p.container_name
+        'container_name': p.container_name,
+        'hostname': hostname,
+        'uptime': str(p.uptime)
     }
     return {k: v for k, v in all_labels.items() if k in labelnames}
 
