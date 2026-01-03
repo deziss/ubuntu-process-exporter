@@ -1,0 +1,15 @@
+[Unit]
+Description=Process Exporter
+After=network.target
+
+[Service]
+Type=simple
+User=process-exporter
+Group=process-exporter
+ExecStart=/usr/bin/python3 /path/to/exporter.py
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
