@@ -1,20 +1,32 @@
-version: '3.8'
+# docker-compose.yml
 
 services:
-  process-exporter:
+  ubuntu-process-exporter:
     build: .
+    image: ubuntu-process-exporter:latest
     network_mode: host
-    privileged: true
     pid: host
+    privileged: true
+    read_only: true
     volumes:
-      - /sys/fs/cgroup:/sys/fs/cgroup:ro
       - /proc:/host/proc:ro
+      # - /sys/fs/cgroup:/sys/fs/cgroup:ro
       - /etc/hostname:/host/etc/hostname:ro
       - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      # - /tmp:/tmp
+      # - /var/run:/var/run
+
     environment:
-      - PROC_DIR=/host/proc
-      - CGROUP_DIR=/sys/fs/cgroup
-      # Optional: Set INCLUDE_LABELS to control which labels are included in metrics
-      # Example: - INCLUDE_LABELS=pid,command,container_name
-      # If not set, all labels are included
+      PROC_DIR: /proc
+      METRICS_PORT: "9106"
+      SCRAPE_TIMEOUT: "300"
+      # Label control (OPTIONAL)
+      # INCLUDE_LABELS: pid,command,container_name,runtime,hostname
+
     restart: unless-stopped
+
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9105/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

@@ -1,27 +1,35 @@
 FROM python:3.12-slim
 
-# Install dependencies
-RUN apt-get update && apt-get install -y \
+# System dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
     procps \
     iproute2 \
     lsof \
+    ca-certificates \
+    tini \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python packages
-COPY requirements.txt /app/requirements.txt
-RUN pip3 install -r /app/requirements.txt
-
-# Copy application files
-COPY . /app/
-
-# Make scripts executable
-RUN chmod +x /app/validate.sh /app/collector.sh
-
-# Set working directory
+# Python dependencies
 WORKDIR /app
 
-# Expose port
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Application files
+COPY . /app/
+
+# Ensure executables
+RUN chmod +x /app/collector.sh /app/validate.sh
+
+# Runtime configuration
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    METRICS_PORT=9105
+
 EXPOSE 9105
 
-# Run validation and then exporter
-CMD ["/bin/bash", "-c", "./validate.sh && python3 exporter.py"]
+# Use tini as PID 1 (IMPORTANT)
+ENTRYPOINT ["/usr/bin/tini", "-s", "--"]
+
+# Validate once, then start exporter
+CMD ["/bin/bash", "-c", "./validate.sh && exec python3 exporter.py"]
