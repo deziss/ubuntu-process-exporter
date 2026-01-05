@@ -13,7 +13,7 @@
 set -euo pipefail
 
 PROC_DIR=${PROC_DIR:-/proc}
-TOP_N=${TOP_N:-100}
+TOP_N=${TOP_N:-50}
 FORMAT=${FORMAT:-tsv}
 SUDO_LSOF=${SUDO_LSOF:-sudo}
 ENABLE_DISK_IO=${ENABLE_DISK_IO:-true}
@@ -22,6 +22,12 @@ CLK_TCK=$(getconf CLK_TCK)
 BOOT_TIME=$(awk '/btime/ {print $2}' /proc/stat)
 MEM_TOTAL_KB=$(awk '/MemTotal:/ {print $2}' /proc/meminfo)
 NOW=$(date +%s)
+
+# --------- PRECOMPUTE ----------
+TOTAL_JIFFIES=$(awk '/^cpu / {for(i=2;i<=8;i++) s+=$i} END{print s}' /proc/stat)
+
+# --------- UID CACHE ----------
+declare -A UID_MAP
 
 # -------------------------------------
 # Network collection (PID → port map)
@@ -35,13 +41,6 @@ if $SUDO_LSOF lsof -i -P -n >/dev/null 2>&1; then
         [[ $port =~ ^[0-9]+$ ]] || continue
         pid_networks[$pid]="${pid_networks[$pid]:-}:$port,"
     done < <($SUDO_LSOF lsof -i -P -n 2>/dev/null | grep -E 'LISTEN|UDP')
-else
-    while read -r line; do
-        [[ $line =~ pid=([0-9]+) ]] || continue
-        pid="${BASH_REMATCH[1]}"
-        port="$(echo "$line" | grep -oE ':[0-9]+' | head -1 | tr -d ':')"
-        [[ -n $port ]] && pid_networks[$pid]="${pid_networks[$pid]:-}:$port,"
-    done < <(ss -tlnup 2>/dev/null)
 fi
 
 # ----------------
@@ -79,7 +78,12 @@ for pid in "$PROC_DIR"/[0-9]*; do
     [[ -z "$comm" || "$comm" == \[* ]] && continue
 
     uid=$(awk '/^Uid:/ {print $2}' "$status")
-    user=$(getent passwd "$uid" | cut -d: -f1 || echo "$uid")
+    # --------- USER CACHE ----------
+    user="${UID_MAP[$uid]:-}"
+    if [[ -z "$user" ]]; then
+        user=$(getent passwd "$uid" | cut -d: -f1 || echo "$uid")
+        UID_MAP[$uid]="$user"
+    fi
 
     rss_kb=$(awk '{print $2 * 4}' "$PROC_DIR/$pid/statm" 2>/dev/null || echo 0)
 
@@ -88,8 +92,7 @@ for pid in "$PROC_DIR"/[0-9]*; do
     (( uptime_sec < 0 )) && uptime_sec=0
 
     proc_jiffies=$(awk '{print $14+$15}' "$stat" 2>/dev/null || echo 0)
-    total_jiffies=$(awk '/^cpu / {for(i=2;i<=8;i++) s+=$i} END{print s}' /proc/stat)
-    cpu_pct=$(awk -v p="$proc_jiffies" -v t="$total_jiffies" \
+    cpu_pct=$(awk -v p="$proc_jiffies" -v t="$TOTAL_JIFFIES" \
         'BEGIN { if (t>0) printf "%.2f", (p/t)*100; else print 0 }')
 
     mem_pct=$(awk -v r="$rss_kb" -v t="$MEM_TOTAL_KB" \
@@ -97,6 +100,7 @@ for pid in "$PROC_DIR"/[0-9]*; do
 
     read rd wr <<< "$(get_disk_io "$pid")"
 
+    # --------- SAFE AGGRESSIVE FILTER ----------
     [[ "$cpu_pct" == "0.00" && "$rss_kb" -eq 0 && "$rd" -eq 0 && "$wr" -eq 0 ]] && continue
 
     # cgroup (v2 preferred)
