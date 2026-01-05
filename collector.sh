@@ -18,10 +18,18 @@ FORMAT=${FORMAT:-tsv}
 SUDO_LSOF=${SUDO_LSOF:-sudo}
 ENABLE_DISK_IO=${ENABLE_DISK_IO:-true}
 
+CACHE_DIR=${CACHE_DIR:-/var/run/upm}
+CACHE_FILE="$CACHE_DIR/collector.cache"
+TMP_FILE="$CACHE_FILE.tmp"
+
 CLK_TCK=$(getconf CLK_TCK)
 BOOT_TIME=$(awk '/btime/ {print $2}' /proc/stat)
 MEM_TOTAL_KB=$(awk '/MemTotal:/ {print $2}' /proc/meminfo)
 NOW=$(date +%s)
+
+
+#--------- PREPARE CACHE DIR ----------
+[[ -d "$CACHE_DIR" ]] || sudo mkdir -p "$CACHE_DIR"
 
 # --------- PRECOMPUTE ----------
 TOTAL_JIFFIES=$(awk '/^cpu / {for(i=2;i<=8;i++) s+=$i} END{print s}' /proc/stat)
@@ -71,63 +79,59 @@ for pid in "$PROC_DIR"/[0-9]*; do
     stat="$PROC_DIR/$pid/stat"
     status="$PROC_DIR/$pid/status"
     statm="$PROC_DIR/$pid/statm"
+    cgfile="$PROC_DIR/$pid/cgroup"
 
     [[ -r "$stat" && -r "$status" && -r "$statm" ]] || continue
 
-    comm=$(tr -d '()' < "$PROC_DIR/$pid/comm" 2>/dev/null || echo "")
+    comm=$(<"$PROC_DIR/$pid/comm")
     [[ -z "$comm" || "$comm" == \[* ]] && continue
 
     uid=$(awk '/^Uid:/ {print $2}' "$status")
-    # --------- USER CACHE ----------
+
     user="${UID_MAP[$uid]:-}"
     if [[ -z "$user" ]]; then
         user=$(getent passwd "$uid" | cut -d: -f1 || echo "$uid")
         UID_MAP[$uid]="$user"
     fi
 
-    rss_kb=$(awk '{print $2 * 4}' "$PROC_DIR/$pid/statm" 2>/dev/null || echo 0)
+    rss_kb=$(awk '{print $2 * 4}' "$statm")
 
     starttime=$(awk '{print $22}' "$stat")
-    uptime_sec=$(( $(date +%s) - (BOOT_TIME + starttime / CLK_TCK) ))
+    uptime_sec=$(( NOW - (BOOT_TIME + starttime / CLK_TCK) ))
     (( uptime_sec < 0 )) && uptime_sec=0
 
-    proc_jiffies=$(awk '{print $14+$15}' "$stat" 2>/dev/null || echo 0)
+    proc_jiffies=$(awk '{print $14+$15}' "$stat")
     cpu_pct=$(awk -v p="$proc_jiffies" -v t="$TOTAL_JIFFIES" \
-        'BEGIN { if (t>0) printf "%.2f", (p/t)*100; else print 0 }')
+        'BEGIN { printf "%.2f", (t>0 ? (p/t)*100 : 0) }')
 
     mem_pct=$(awk -v r="$rss_kb" -v t="$MEM_TOTAL_KB" \
-        'BEGIN { if (t>0) printf "%.2f", (r/t)*100; else print 0 }')
+        'BEGIN { printf "%.2f", (t>0 ? (r/t)*100 : 0) }')
 
     read rd wr <<< "$(get_disk_io "$pid")"
 
-    # --------- SAFE AGGRESSIVE FILTER ----------
+    # Safe aggressive filter
     [[ "$cpu_pct" == "0.00" && "$rss_kb" -eq 0 && "$rd" -eq 0 && "$wr" -eq 0 ]] && continue
 
-    # cgroup (v2 preferred)
+    # -------- Optimized cgroup --------
     cgroup=""
-    if [[ -r "$PROC_DIR/$pid/cgroup" ]]; then
-        cgroup="$(
-            awk -F: '
-              $1=="0" {print $3; exit}
-              /kubepods|docker|containerd|libpod/ {print $3; exit}
-              {fallback=$3}
-              END {print fallback}
-            ' "$PROC_DIR/$pid/cgroup"
-        )"
+    if [[ -r "$cgfile" ]]; then
+        while IFS=: read -r hier _ path; do
+            if [[ "$hier" == "0" ]]; then
+                cgroup="$path"
+                break
+            fi
+            if [[ "$path" == *kubepods* || "$path" == *docker* || "$path" == *containerd* || "$path" == *libpod* ]]; then
+                cgroup="$path"
+                break
+            fi
+            cgroup="$path"
+        done < "$cgfile"
     fi
     cgroup="${cgroup:0:500}"
 
-    net="${pid_networks[$pid]:-}"
-    ip=""
-    port=""
-    if [[ -n "$net" ]]; then
-        first="${net%%,*}"
-        ip="${first%:*}"
-        port="${first#*:}"
-    fi
-
-    rows+=("$pid	$uid	$user	$cpu_pct	$mem_pct	$rss_kb	$uptime_sec	$comm	$rd	$wr	$ip	$port	$cgroup")
+    rows+=("$pid	$uid	$user	$cpu_pct	$mem_pct	$rss_kb	$uptime_sec	$comm	$rd	$wr		$cgroup")
 done
+
 
 set +o pipefail
 
@@ -159,3 +163,11 @@ else
 fi
 
 set -o pipefail
+
+
+# ---------------- Persist (atomic) ----------------
+printf "%s\n" "${rows[@]}" \
+| sort -t$'\t' -k4,4nr -k5,5nr \
+| head -n "$TOP_N" > "$TMP_FILE"
+
+mv "$TMP_FILE" "$CACHE_FILE"
