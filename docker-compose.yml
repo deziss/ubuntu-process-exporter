@@ -20,6 +20,8 @@ services:
       PROC_DIR: /proc
       METRICS_PORT: "9106"
       SCRAPE_TIMEOUT: "300"
+      TOP_N: "25"          # ✅ ADD THIS
+      ENABLE_DISK_IO: "true"
       # Label control (OPTIONAL)
       # INCLUDE_LABELS: pid,command,container_name,runtime,hostname
 

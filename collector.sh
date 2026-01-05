@@ -16,10 +16,12 @@ PROC_DIR=${PROC_DIR:-/proc}
 TOP_N=${TOP_N:-100}
 FORMAT=${FORMAT:-tsv}
 SUDO_LSOF=${SUDO_LSOF:-sudo}
+ENABLE_DISK_IO=${ENABLE_DISK_IO:-true}
 
 CLK_TCK=$(getconf CLK_TCK)
 BOOT_TIME=$(awk '/btime/ {print $2}' /proc/stat)
 MEM_TOTAL_KB=$(awk '/MemTotal:/ {print $2}' /proc/meminfo)
+NOW=$(date +%s)
 
 # -------------------------------------
 # Network collection (PID → port map)
@@ -46,8 +48,8 @@ fi
 # Disk I/O helper
 # ----------------
 get_disk_io() {
-    local pid=$1
-    local io="$PROC_DIR/$pid/io"
+    [[ "$ENABLE_DISK_IO" != "true" ]] && { echo "0 0"; return; }
+    local io="$PROC_DIR/$1/io"
     if [[ -r "$io" ]]; then
         awk '
           /read_bytes:/  {r=$2}
@@ -64,11 +66,14 @@ get_disk_io() {
 # ----------------------------
 rows=()
 
-for pid in $(ls -1 "$PROC_DIR" | grep -E '^[0-9]+$'); do
+for pid in "$PROC_DIR"/[0-9]*; do
+    pid="${pid##*/}"
+
     stat="$PROC_DIR/$pid/stat"
     status="$PROC_DIR/$pid/status"
+    statm="$PROC_DIR/$pid/statm"
 
-    [[ -r "$stat" && -r "$status" ]] || continue
+    [[ -r "$stat" && -r "$status" && -r "$statm" ]] || continue
 
     comm=$(tr -d '()' < "$PROC_DIR/$pid/comm" 2>/dev/null || echo "")
     [[ -z "$comm" || "$comm" == \[* ]] && continue
@@ -92,14 +97,15 @@ for pid in $(ls -1 "$PROC_DIR" | grep -E '^[0-9]+$'); do
 
     read rd wr <<< "$(get_disk_io "$pid")"
 
+    [[ "$cpu_pct" == "0.00" && "$rss_kb" -eq 0 && "$rd" -eq 0 && "$wr" -eq 0 ]] && continue
+
     # cgroup (v2 preferred)
     cgroup=""
     if [[ -r "$PROC_DIR/$pid/cgroup" ]]; then
         cgroup="$(
             awk -F: '
               $1=="0" {print $3; exit}
-              /kubepods/ {print $3; exit}
-              /docker|containerd|libpod/ {print $3; exit}
+              /kubepods|docker|containerd|libpod/ {print $3; exit}
               {fallback=$3}
               END {print fallback}
             ' "$PROC_DIR/$pid/cgroup"

@@ -155,7 +155,7 @@ def extract_container_id(cgroup_path: str, runtime: str) -> str:
     return ''
 
 # ENHANCED: Multi-runtime metadata (async-friendly)
-@lru_cache(maxsize=256)
+@lru_cache(maxsize=1024)
 def resolve_container_metadata(container_id: str, runtime: str) -> Dict[str, str]:
     if not container_id or runtime == 'host':
         return {'container_name': '', 'pod_name': '', 'namespace': ''}
