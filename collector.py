@@ -20,17 +20,15 @@ ENABLE_DISK_IO = os.getenv('ENABLE_DISK_IO', 'true').lower() == 'true'
 
 @dataclass
 class ProcessMetric:
-    pid: int
-    uid: int
+    pid: int    
     user: str
     command: str
     cpu_pct: float
     mem_pct: float  # NEW: % memory
     mem_rss_kb: int
     disk_read_bytes: int
-    disk_write_bytes: int
-    ip: Optional[str]
-    port: Optional[str]
+    disk_write_bytes: int    
+    ports: Optional[str]
     cgroup_path: str
     uptime_sec: int  # Renamed for Prometheus
     # Container/Orchestration
@@ -79,24 +77,22 @@ def collect_data() -> List[ProcessMetric]:
             continue
         
         parts = line.split('\t')
-        if len(parts) < 12:
+        if len(parts) < 11:
             print(f"Line {line_num} invalid ({len(parts)} fields): {line}", file=sys.stderr)
             continue
             
         try:
-            pid, uid, user, pcpu, pmem, rss, etimes, comm, disk_read, disk_write, ip, port, cgroup_path = parts[:13]
+            pid, user, pcpu, pmem, rss, etimes, comm, disk_read, disk_write, ports, cgroup_path = parts[:11]
             pm = ProcessMetric(
-                pid=int(pid),
-                uid=int(uid),
+                pid=int(pid),                
                 user=user.strip(),
                 command=comm.strip(),
                 cpu_pct=float(pcpu) or 0.0,
-                mem_pct=float(pmem) or 0.0,  # NEW
+                mem_pct=float(pmem) or 0.0,
                 mem_rss_kb=int(rss),
                 disk_read_bytes=int(disk_read),
                 disk_write_bytes=int(disk_write),
-                ip=ip.strip() or None,
-                port=port.strip() or None,  # Empty → conditional label skip
+                ports=ports.strip() or None,  # Empty → conditional label skip
                 cgroup_path=cgroup_path.strip()[:500],  # Truncate
                 uptime_sec=int(etimes),
                 node_name=socket.gethostname()

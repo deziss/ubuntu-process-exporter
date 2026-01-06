@@ -43,14 +43,57 @@ HOSTNAME = (
         else socket.gethostname())
 )
 
-INCLUDE_LABELS = [
-    l.strip()
-    for l in os.getenv(
+# Parse and normalize label names
+VALID_LABELS = {
+    "pid", "user", "command", "runtime", "rank", 
+    "container_id", "container_name", "pod_name", 
+    "namespace", "ports", "hostname"
+}
+
+# Common typos/variations mapping
+LABEL_ALIASES = {
+    "port": "ports",  # Common mistake: singular instead of plural
+    "host": "hostname",
+    "container": "container_name",
+    "pod": "pod_name",
+    "ns": "namespace",
+}
+
+def normalize_labels(raw_labels: str) -> List[str]:
+    """Normalize and validate label names"""
+    labels = []
+    invalid = []
+    
+    for label in raw_labels.split(","):
+        label = label.strip()
+        if not label:
+            continue
+            
+        # Normalize common variations
+        normalized = LABEL_ALIASES.get(label, label)
+        
+        # Validate against known labels
+        if normalized in VALID_LABELS:
+            if normalized not in labels:  # Avoid duplicates
+                labels.append(normalized)
+        else:
+            invalid.append(label)
+    
+    # Log warnings for invalid labels
+    if invalid:
+        logging.warning(
+            f"Invalid label names ignored: {invalid}. "
+            f"Valid labels: {sorted(VALID_LABELS)}"
+        )
+    
+    return labels
+
+INCLUDE_LABELS = normalize_labels(
+    os.getenv(
         "INCLUDE_LABELS",
-        "pid,uid,user,command,runtime,rank,container_id,container_name,pod_name,namespace,port,hostname",
-    ).split(",")
-    if l.strip()
-]
+        "pid,user,command,runtime,rank,container_id,container_name,pod_name,namespace,ports,hostname",
+    )
+)
 
 # Logging
 logging.basicConfig(
@@ -75,7 +118,6 @@ SCRAPE_DURATION = Histogram(
     "Time spent collecting process metrics",
     buckets=(0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5),
 )
-
 
 SCRAPE_ERRORS = Counter(
     "upm_scrape_errors_total",
@@ -136,22 +178,35 @@ ALL_METRICS = [
 
 # Helpers
 def labels_for(p: ProcessMetric) -> Dict[str, str]:
-    """Build label dict with strict cardinality control"""
-    labels = {
+    """Build label dict with strict cardinality control and validation"""
+    # All possible labels with their values
+    all_labels = {
         "pid": str(p.pid),
-        "uid": str(p.uid),
         "user": p.user or "",
-        "command": p.command[:64],
-        "runtime": p.runtime,
+        "command": (p.command or "")[:64],
+        "runtime": p.runtime or "",
         "rank": str(p.rank),
-        "container_id": p.container_id[:12],
-        "container_name": p.container_name[:64],
-        "pod_name": p.pod_name[:64],
-        "namespace": p.namespace[:64],
-        "port": str(p.port) if p.port else "",
+        "container_id": (p.container_id or "")[:12],
+        "container_name": (p.container_name or "")[:64],
+        "pod_name": (p.pod_name or "")[:64],
+        "namespace": (p.namespace or "")[:64],
+        "ports": str(p.ports) if p.ports else "",
         "hostname": HOSTNAME,
     }
-    return {k: v for k, v in labels.items() if k in INCLUDE_LABELS}
+    
+    # Only return labels that are in INCLUDE_LABELS
+    result = {k: v for k, v in all_labels.items() if k in INCLUDE_LABELS}
+    
+    # Defensive check: ensure we're not missing any expected labels
+    missing = set(INCLUDE_LABELS) - set(result.keys())
+    if missing:
+        log.warning(f"Missing labels in labels_for: {missing}. This shouldn't happen.")
+        # Fill missing labels with empty strings to prevent errors
+        for label in missing:
+            result[label] = ""
+    
+    return result
+
 
 def clear_metrics():
     for m in ALL_METRICS:
@@ -244,7 +299,12 @@ def run():
     log.info("UPM Exporter started")
     log.info("Port: %d", METRICS_PORT)
     log.info("Hostname: %s", HOSTNAME)
-    log.info("Labels: %s", INCLUDE_LABELS)
+    log.info("Labels (normalized): %s", INCLUDE_LABELS)
+    
+    # Validate that metrics are properly configured
+    if not INCLUDE_LABELS:
+        log.error("No valid labels configured! Metrics will fail.")
+        sys.exit(1)
 
     while not shutdown_flag.is_set():
         server.handle_request()

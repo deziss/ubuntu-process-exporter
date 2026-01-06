@@ -3,7 +3,7 @@
 # collector.sh — Enhanced Raw Process Collector (PROC-ONLY, FIXED)
 #
 # Output (TSV):
-# pid uid user cpu_pct mem_pct rss_kb uptime_sec comm
+# pid user cpu_pct mem_pct rss_kb uptime_sec comm
 # disk_read_bytes disk_write_bytes ip port cgroup
 #
 # Supports: TSV / JSON
@@ -18,7 +18,7 @@ FORMAT=${FORMAT:-tsv}
 SUDO_LSOF=${SUDO_LSOF:-sudo}
 ENABLE_DISK_IO=${ENABLE_DISK_IO:-true}
 
-CACHE_DIR=${CACHE_DIR:-/var/run/upm}
+CACHE_DIR=${CACHE_DIR:-/tmp/upm}
 CACHE_FILE="$CACHE_DIR/collector.cache"
 TMP_FILE="$CACHE_FILE.tmp"
 
@@ -29,7 +29,11 @@ NOW=$(date +%s)
 
 
 #--------- PREPARE CACHE DIR ----------
-[[ -d "$CACHE_DIR" ]] || sudo mkdir -p "$CACHE_DIR"
+if command -v sudo >/dev/null 2>&1; then
+    [[ -d "$CACHE_DIR" ]] || sudo mkdir -p "$CACHE_DIR"
+else
+    [[ -d "$CACHE_DIR" ]] || mkdir -p "$CACHE_DIR"
+fi
 
 # --------- PRECOMPUTE ----------
 TOTAL_JIFFIES=$(awk '/^cpu / {for(i=2;i<=8;i++) s+=$i} END{print s}' /proc/stat)
@@ -129,45 +133,48 @@ for pid in "$PROC_DIR"/[0-9]*; do
     fi
     cgroup="${cgroup:0:500}"
 
-    rows+=("$pid	$uid	$user	$cpu_pct	$mem_pct	$rss_kb	$uptime_sec	$comm	$rd	$wr		$cgroup")
+    net="${pid_networks[$pid]:-}"
+    ports=""
+    if [[ -n "$net" ]]; then
+        ports="$(printf "%s\n" "$net" | tr ',' '\n' | awk -F: '{print $NF}' | paste -sd ',' -)"
+    fi
+
+    rows+=("$pid\t$user\t$cpu_pct\t$mem_pct\t$rss_kb\t$uptime_sec\t$comm\t$rd\t$wr\t$ports\t$cgroup")
 done
 
 
 set +o pipefail
 
 if [[ $FORMAT == json ]]; then
-    printf "%s\n" "${rows[@]}" \
+    printf "%b\n" "${rows[@]}" \
     | sort -t$'\t' -k4,4nr -k5,5nr \
     | head -n "$TOP_N" \
     | jq -R '
         split("\t") |
         {
-          pid: .[0]|tonumber,
-          uid: .[1]|tonumber,
-          user: .[2],
-          cpu_pct: .[3]|tonumber,
-          mem_pct: .[4]|tonumber,
-          rss_kb: .[5]|tonumber,
-          uptime_sec: .[6]|tonumber,
-          command: .[7],
-          disk_read_bytes: .[8]|tonumber,
-          disk_write_bytes: .[9]|tonumber,
-          ip: .[10],
-          port: .[11],
-          cgroup: .[12]
+            pid: .[0] | tonumber,
+            user: .[1],
+            cpu_pct: .[2] | tonumber?,
+            mem_pct: .[3] | tonumber?,
+            rss_kb: .[4] | tonumber?,
+            uptime_sec: .[5] | tonumber?,
+            command: .[6],
+            disk_read_bytes: .[7] | tonumber?,
+            disk_write_bytes: .[8] | tonumber?,
+            ports: (.[9] | rtrimstr(",")),
+            cgroup: .[10]
         }'
 else
-    printf "%s\n" "${rows[@]}" \
+    printf "%b\n" "${rows[@]}" \
     | sort -t$'\t' -k4,4nr -k5,5nr \
     | head -n "$TOP_N"
 fi
 
-set -o pipefail
-
-
 # ---------------- Persist (atomic) ----------------
-printf "%s\n" "${rows[@]}" \
+printf "%b\n" "${rows[@]}" \
 | sort -t$'\t' -k4,4nr -k5,5nr \
 | head -n "$TOP_N" > "$TMP_FILE"
 
 mv "$TMP_FILE" "$CACHE_FILE"
+
+set -o pipefail

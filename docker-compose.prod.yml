@@ -1,0 +1,33 @@
+# docker-compose.yml
+
+services:
+    ubuntu-process-exporter:
+    image: deziss/ubuntu-process-exporter:v0.2.1
+    privileged: true
+    pid: host
+    network_mode: host  ## if it is 'host' comment ports
+    read_only: true
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:ro
+      - /proc:/host/proc:ro
+      - /etc/hostname:/host/etc/hostname:ro
+      - /disk1/docker/containers:/var/lib/docker/containers:ro
+      - upm-cache:/tmp/upm
+    environment:
+      PROC_DIR: "/proc"
+      METRICS_PORT: "9105"
+      SCRAPE_TIMEOUT: "300"
+      TOP_N: "25"
+      INCLUDE_LABELS: "pid,user,command,runtime,container_id,container_name,ports,hostname"
+      # Optional: Set INCLUDE_LABELS to control which labels are included in metrics
+      # Example: - INCLUDE_LABELS=pid,command,container_name
+      # If not set, all labels are included
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9105/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  upm-cache:

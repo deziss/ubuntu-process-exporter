@@ -7,6 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     lsof \
     ca-certificates \
     tini \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Python dependencies
