@@ -1,7 +1,7 @@
 # docker-compose.yml
 
 services:
-    ubuntu-process-exporter:
+  ubuntu-process-exporter:
     image: deziss/ubuntu-process-exporter:v0.2.1
     privileged: true
     pid: host
