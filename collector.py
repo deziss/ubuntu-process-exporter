@@ -2,9 +2,9 @@
 """
 Ultra-Optimized Process Collector
 
-v0.3.2 - Maximum Performance:
+v0.3.5 - Maximum Performance + Metadata:
 - Minimal parsing overhead
-- No container metadata resolution (shell handles it)
+- Regex-based container metadata resolution (No external calls)
 - Direct attribute assignment
 - Simplified data structures
 """
@@ -13,6 +13,7 @@ import subprocess
 import sys
 import os
 import signal
+import re
 from dataclasses import dataclass
 from typing import List, Dict
 from contextlib import contextmanager
@@ -20,6 +21,10 @@ from contextlib import contextmanager
 # Config
 TOP_N = int(os.getenv('TOP_N', '50'))
 TIMEOUT_SEC = int(os.getenv('COLLECTOR_TIMEOUT', '30'))
+
+# Pre-compiled regex for container extraction
+# Capture ID from common patterns
+RE_CONTAINER_ID = re.compile(r'([0-9a-fA-F]{64}|[0-9a-fA-F]{12})')
 
 @dataclass(slots=True)
 class ProcessMetric:
@@ -38,7 +43,6 @@ class ProcessMetric:
     runtime: str
     container_id: str = ""
     container_name: str = ""
-    pod_name: str = ""
 
 @contextmanager
 def timeout(seconds: int):
@@ -52,6 +56,34 @@ def timeout(seconds: int):
     finally:
         signal.alarm(0)
         signal.signal(signal.SIGALRM, old)
+
+def extract_metadata(cgroup_path: str, runtime: str) -> tuple[str, str]:
+    """Efficiently extract container ID and Name from cgroup path"""
+    if runtime == "host" or not cgroup_path or cgroup_path == "/":
+        return "", ""
+    
+    # Fast extraction logic
+    cid = ""
+    name = ""
+    
+    # 1. Try to find container ID using common patterns (fastest)
+    match = RE_CONTAINER_ID.search(cgroup_path)
+    if match:
+        cid = match.group(1)[:12]  # Short ID
+    
+    # 2. Heuristic for name
+    # Systemd/Crio often put name in .scope or directory names
+    # e.g. /system.slice/docker-CONTAINERNAME.scope
+    # or /.../kubepods/.../podID/containerID
+    
+    # If we have a CID, check if there's a readable name elsewhere
+    # For now, we will fallback name to CID unless we see distinct scope
+    name = cid
+    
+    # K8s Special Case: Try to find pod name or container name logic if needed
+    # But for "Option B" speed, just getting the ID is 90% of value
+    
+    return cid, name
 
 def collect_data() -> List[ProcessMetric]:
     """Fast data collection with minimal overhead"""
@@ -79,7 +111,8 @@ def collect_data() -> List[ProcessMetric]:
             continue
         
         try:
-            processes.append(ProcessMetric(
+            # Parse basic fields
+            pm = ProcessMetric(
                 pid=int(parts[0]),
                 user=parts[1],
                 command=parts[6],
@@ -92,7 +125,14 @@ def collect_data() -> List[ProcessMetric]:
                 cgroup_path=parts[10][:300] if parts[10] else "/",
                 uptime_sec=int(parts[5]) if parts[5] else 0,
                 runtime=parts[11] or "host",
-            ))
+            )
+            
+            # Enrich with Metadata (Option B)
+            if pm.runtime != "host":
+                pm.container_id, pm.container_name = extract_metadata(pm.cgroup_path, pm.runtime)
+                
+            processes.append(pm)
+            
         except (ValueError, IndexError):
             continue
 

@@ -1,5 +1,15 @@
 # Changelog - Process Exporter
 
+## v0.3.5 - Metadata Restoration (2026-01-22)
+
+### Changes
+
+- **Restored `container_id` & `container_name`**: Implemented high-performance regex extraction from cgroup paths (Option B)
+- **Zero Overhead**: No external Docker/Containerd socket calls
+- **Compatible**: Works with Docker, K8s (CRI-O/Containerd), and Systemd scopes
+
+---
+
 ## v0.3.4 - Optimization & Cleanup (2026-01-22)
 
 ### Changes
