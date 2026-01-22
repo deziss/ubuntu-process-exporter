@@ -1,5 +1,22 @@
 # Changelog - Process Exporter
 
+## v0.2.8 - Cgroup v1 Compatibility Fix (2026-01-22)
+
+### Bug Fixes
+
+- **Fixed cgroup v1 timeout**: Added 15-line limit when parsing cgroup files to prevent infinite loops
+- **Fixed lsof timeout**: Added 5-10 second timeout to lsof commands to prevent hanging on sudo password prompts
+- **Better error handling**: Added `|| continue` and `2>/dev/null` throughout to handle edge cases gracefully
+- **Cache directory handling**: Fixed permission issues when creating cache directory
+
+### Changes
+
+- collector.sh: More robust file reading with line limits
+- collector.sh: lsof now uses `timeout` command wrapper
+- collector.sh: Empty rows array handled gracefully (exit 0 instead of error)
+
+---
+
 ## v0.2.7 - Performance Optimization Release (2026-01-22)
 
 ### Performance Improvements

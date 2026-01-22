@@ -2,11 +2,10 @@
 #
 # collector.sh — Enhanced Raw Process Collector (Dual Cgroup v1/v2 Support)
 #
-# v0.2.7 - Performance Optimizations:
-# - Reduced subprocess spawning
-# - Cached UID lookups
-# - Optimized awk invocations
-# - Batch file operations
+# v0.2.8 - Fixed cgroup v1 compatibility:
+# - Added timeout to cgroup file reads
+# - Optimized lsof handling
+# - Better error handling
 #
 # Output (TSV):
 # pid user cpu_pct mem_pct rss_kb uptime_sec comm
@@ -50,10 +49,12 @@ CGROUP_VERSION=$(detect_cgroup_version)
 
 
 #--------- PREPARE CACHE DIR ----------
-if command -v sudo >/dev/null 2>&1; then
-    [[ -d "$CACHE_DIR" ]] || sudo mkdir -p "$CACHE_DIR"
+if [[ -d "$CACHE_DIR" ]] && [[ -w "$CACHE_DIR" ]]; then
+    : # Cache dir exists and is writable
+elif command -v sudo >/dev/null 2>&1 && [[ -n "${SUDO_LSOF:-}" ]]; then
+    sudo mkdir -p "$CACHE_DIR" 2>/dev/null || mkdir -p "$CACHE_DIR" 2>/dev/null || true
 else
-    [[ -d "$CACHE_DIR" ]] || mkdir -p "$CACHE_DIR"
+    mkdir -p "$CACHE_DIR" 2>/dev/null || true
 fi
 
 # --------- PRECOMPUTE ----------
@@ -62,7 +63,7 @@ TOTAL_JIFFIES=$(awk '/^cpu / {for(i=2;i<=8;i++) s+=$i} END{print s}' /proc/stat)
 # --------- UID CACHE (associative array) ----------
 declare -A UID_MAP
 
-# --------- Parse Cgroup Path (v1 & v2) - Optimized ---------
+# --------- Parse Cgroup Path (v1 & v2) - Fixed for v1 ---------
 parse_cgroup_path() {
     local pid=$1
     local cgfile="$PROC_DIR/$pid/cgroup"
@@ -74,11 +75,12 @@ parse_cgroup_path() {
 
     if [[ "$CGROUP_VERSION" == "v2" ]]; then
         # Cgroup v2: single line, format: 0::/path/to/cgroup
-        cgroup_path=$(tail -1 "$cgfile" | cut -d: -f3)
+        cgroup_path=$(head -1 "$cgfile" 2>/dev/null | cut -d: -f3) || cgroup_path=""
         cgroup_version="v2"
     else
-        # Cgroup v1: multiple lines, pick the most informative
-        while IFS=: read -r hier _ path; do
+        # Cgroup v1: read first few lines only to avoid hanging
+        local line_count=0
+        while IFS=: read -r hier _ path && (( line_count++ < 15 )); do
             case "$path" in
                 *docker*)
                     cgroup_path="$path"; runtime="docker"; break ;;
@@ -99,7 +101,7 @@ parse_cgroup_path() {
         cgroup_version="v1"
     fi
 
-    # Detect runtime from v2 paths (optimized with case statement)
+    # Detect runtime from v2 paths
     if [[ "$CGROUP_VERSION" == "v2" ]] && [[ "$runtime" == "host" ]]; then
         case "$cgroup_path" in
             *docker*) runtime="docker" ;;
@@ -111,22 +113,34 @@ parse_cgroup_path() {
         esac
     fi
 
-    # Truncate for output (use parameter expansion instead of substring)
+    # Truncate for output
     echo -e "${cgroup_path:0:300}\t$cgroup_version\t$runtime"
 }
 
 # -------------------------------------
-# Network collection (PID → port map) - Optimized
+# Network collection (PID → port map) - Fixed timeout
 # -------------------------------------
 declare -A pid_networks
 
-if $SUDO_LSOF lsof -i -P -n >/dev/null 2>&1; then
+# Only run lsof if SUDO_LSOF is set and lsof exists
+if [[ -n "${SUDO_LSOF:-}" ]] && command -v lsof >/dev/null 2>&1; then
+    # Use timeout to prevent hanging on sudo password prompt
+    if timeout 5 $SUDO_LSOF lsof -i -P -n >/dev/null 2>&1; then
+        while read -r _ pid _ _ _ _ _ _ name; do
+            [[ $name == *:* ]] || continue
+            port="${name##*:}"
+            [[ $port =~ ^[0-9]+$ ]] || continue
+            pid_networks[$pid]="${pid_networks[$pid]:-}:$port,"
+        done < <(timeout 10 $SUDO_LSOF lsof -i -P -n 2>/dev/null | grep -E 'LISTEN|UDP' || true)
+    fi
+elif command -v lsof >/dev/null 2>&1; then
+    # Try without sudo
     while read -r _ pid _ _ _ _ _ _ name; do
         [[ $name == *:* ]] || continue
         port="${name##*:}"
         [[ $port =~ ^[0-9]+$ ]] || continue
         pid_networks[$pid]="${pid_networks[$pid]:-}:$port,"
-    done < <($SUDO_LSOF lsof -i -P -n 2>/dev/null | grep -E 'LISTEN|UDP')
+    done < <(timeout 10 lsof -i -P -n 2>/dev/null | grep -E 'LISTEN|UDP' || true)
 fi
 
 # ----------------
@@ -140,7 +154,7 @@ get_disk_io() {
           /read_bytes:/  {r=$2}
           /write_bytes:/ {w=$2}
           END {print r+0, w+0}
-        ' "$io" 2>/dev/null
+        ' "$io" 2>/dev/null || echo "0 0"
     else
         echo "0 0"
     fi
@@ -165,7 +179,8 @@ for pid in "$PROC_DIR"/[0-9]*; do
     [[ -z "$comm" || "$comm" == \[* ]] && continue
 
     # Extract UID with optimized awk
-    uid=$(awk '/^Uid:/ {print $2; exit}' "$status")
+    uid=$(awk '/^Uid:/ {print $2; exit}' "$status" 2>/dev/null) || continue
+    [[ -z "$uid" ]] && continue
 
     # Cache UID → username lookup
     user="${UID_MAP[$uid]:-}"
@@ -175,15 +190,16 @@ for pid in "$PROC_DIR"/[0-9]*; do
     fi
 
     # Read statm for RSS (optimized - single read)
-    read -r _ rss_pages _ < "$statm"
+    read -r _ rss_pages _ < "$statm" 2>/dev/null || continue
     rss_kb=$((rss_pages * 4))
 
     # Read stat for starttime and jiffies (optimized - single awk)
-    read -r starttime proc_jiffies <<< $(awk '{print $22, $14+$15}' "$stat")
+    read -r starttime proc_jiffies <<< $(awk '{print $22, $14+$15}' "$stat" 2>/dev/null) || continue
+    [[ -z "$starttime" ]] && continue
     uptime_sec=$(( NOW - (BOOT_TIME + starttime / CLK_TCK) ))
     (( uptime_sec < 0 )) && uptime_sec=0
 
-    # Calculate CPU and memory percentages (combined awk)
+    # Calculate CPU and memory percentages
     cpu_pct=$(awk -v p="$proc_jiffies" -v t="$TOTAL_JIFFIES" \
         'BEGIN { printf "%.2f", (t>0 ? (p/t)*100 : 0) }')
 
@@ -196,13 +212,13 @@ for pid in "$PROC_DIR"/[0-9]*; do
     [[ "$cpu_pct" == "0.00" && "$rss_kb" -eq 0 && "$rd" -eq 0 && "$wr" -eq 0 ]] && continue
 
     # -------- Parse cgroup (v1 & v2) --------
-    read cgroup_path cgroup_version runtime <<< "$(parse_cgroup_path "$pid")"
+    read cgroup_path cgroup_version runtime <<< "$(parse_cgroup_path "$pid")" || continue
 
     # Extract ports (optimized)
     net="${pid_networks[$pid]:-}"
     ports=""
     if [[ -n "$net" ]]; then
-        ports=$(printf "%s" "$net" | tr ':,' '\n' | grep -E '^[0-9]+$' | sort -u | paste -sd ',' -)
+        ports=$(printf "%s" "$net" | tr ':,' '\n' | grep -E '^[0-9]+$' | sort -u | paste -sd ',' - 2>/dev/null) || ports=""
     fi
 
     rows+=("$pid\t$user\t$cpu_pct\t$mem_pct\t$rss_kb\t$uptime_sec\t$comm\t$rd\t$wr\t$ports\t$cgroup_path\t$cgroup_version\t$runtime")
@@ -210,6 +226,11 @@ done
 
 
 set +o pipefail
+
+if [[ ${#rows[@]} -eq 0 ]]; then
+    # No processes collected, exit cleanly
+    exit 0
+fi
 
 if [[ $FORMAT == json ]]; then
     printf "%b\n" "${rows[@]}" \
