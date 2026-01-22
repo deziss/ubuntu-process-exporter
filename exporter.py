@@ -245,10 +245,13 @@ class MetricsHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
     def _handle_ok(self):
-        self.send_response(200)
-        self.send_header("Content-Type", "text/plain")
-        self.end_headers()
-        self.wfile.write(b"OK\n")
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"OK\n")
+        except BrokenPipeError:
+            pass  # Client disconnected, ignore
 
     def _handle_metrics(self):
         with SCRAPE_DURATION.time():
@@ -300,29 +303,32 @@ class MetricsHandler(BaseHTTPRequestHandler):
                 self.send_error(500, str(e))
 
     def _write_metrics(self):
-        output = generate_latest()
-        
-        # Check if client accepts gzip and output size warrants compression
-        accept_encoding = self.headers.get('Accept-Encoding', '')
-        use_gzip = (
-            ENABLE_GZIP 
-            and 'gzip' in accept_encoding 
-            and len(output) >= GZIP_MIN_SIZE
-        )
-        
-        if use_gzip:
-            output = compress_gzip(output)
-            self.send_response(200)
-            self.send_header("Content-Type", CONTENT_TYPE_LATEST)
-            self.send_header("Content-Encoding", "gzip")
-            self.send_header("Content-Length", str(len(output)))
-        else:
-            self.send_response(200)
-            self.send_header("Content-Type", CONTENT_TYPE_LATEST)
-            self.send_header("Content-Length", str(len(output)))
-        
-        self.end_headers()
-        self.wfile.write(output)
+        try:
+            output = generate_latest()
+            
+            # Check if client accepts gzip and output size warrants compression
+            accept_encoding = self.headers.get('Accept-Encoding', '')
+            use_gzip = (
+                ENABLE_GZIP 
+                and 'gzip' in accept_encoding 
+                and len(output) >= GZIP_MIN_SIZE
+            )
+            
+            if use_gzip:
+                output = compress_gzip(output)
+                self.send_response(200)
+                self.send_header("Content-Type", CONTENT_TYPE_LATEST)
+                self.send_header("Content-Encoding", "gzip")
+                self.send_header("Content-Length", str(len(output)))
+            else:
+                self.send_response(200)
+                self.send_header("Content-Type", CONTENT_TYPE_LATEST)
+                self.send_header("Content-Length", str(len(output)))
+            
+            self.end_headers()
+            self.wfile.write(output)
+        except BrokenPipeError:
+            pass  # Client disconnected, ignore
 
 
 # Server
