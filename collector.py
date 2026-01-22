@@ -35,12 +35,10 @@ class ProcessMetric:
     ports: str
     cgroup_path: str
     uptime_sec: int
-    cgroup_version: str
     runtime: str
     container_id: str = ""
     container_name: str = ""
     pod_name: str = ""
-    namespace: str = ""
 
 @contextmanager
 def timeout(seconds: int):
@@ -77,7 +75,7 @@ def collect_data() -> List[ProcessMetric]:
             continue
         
         parts = line.split('\t')
-        if len(parts) < 13:
+        if len(parts) < 12:
             continue
         
         try:
@@ -93,8 +91,7 @@ def collect_data() -> List[ProcessMetric]:
                 ports=parts[9] or "",
                 cgroup_path=parts[10][:300] if parts[10] else "/",
                 uptime_sec=int(parts[5]) if parts[5] else 0,
-                cgroup_version=parts[11] or "unknown",
-                runtime=parts[12] or "host",
+                runtime=parts[11] or "host",
             ))
         except (ValueError, IndexError):
             continue

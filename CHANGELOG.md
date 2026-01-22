@@ -1,5 +1,15 @@
 # Changelog - Process Exporter
 
+## v0.3.4 - Optimization & Cleanup (2026-01-22)
+
+### Changes
+
+- **Removed `cgroup_version` label/field**: Simplified output (12 fields) and reduced cardinality
+- **Updated `collector.sh`**: JSON output schema updated
+- **Updated `collector.py` & `exporter.py`**: Removed unused parsing logic
+
+---
+
 ## v0.2.8 - Cgroup v1 Compatibility Fix (2026-01-22)
 
 ### Bug Fixes

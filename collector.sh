@@ -32,13 +32,6 @@ MEM_TOTAL_KB=$(awk '/MemTotal:/ {print $2}' "$SYS_PROC/meminfo" 2>/dev/null) || 
 NOW=$(date +%s)
 TOTAL_JIFFIES=$(awk '/^cpu / {for(i=2;i<=8;i++) s+=$i} END{print s+0}' "$SYS_PROC/stat" 2>/dev/null) || TOTAL_JIFFIES=1
 
-# Detect Cgroup Version
-if [[ -f "$CGROUP_DIR/cgroup.controllers" ]]; then
-    CGROUP_VERSION="v2"
-else
-    CGROUP_VERSION="v1"
-fi
-
 # UID CACHE
 declare -A UID_MAP 2>/dev/null || true
 
@@ -152,7 +145,7 @@ for piddir in "$PROC_DIR"/[0-9]*; do
         fi
     fi
     
-    rows+=("$pid\t$user\t$cpu_pct\t$mem_pct\t$rss_kb\t$uptime_sec\t$comm\t$rd\t$wr\t\t${cgroup_path:-/}\t$CGROUP_VERSION\t$runtime")
+    rows+=("$pid\t$user\t$cpu_pct\t$mem_pct\t$rss_kb\t$uptime_sec\t$comm\t$rd\t$wr\t\t${cgroup_path:-/}\t$runtime")
 done
 
 # Exit if no data
@@ -164,7 +157,7 @@ if [[ $FORMAT == json ]]; then
     printf "%b\n" "${rows[@]}" \
     | sort -t$'\t' -k4,4nr -k5,5nr \
     | head -n "$TOP_N" \
-    | jq -R 'split("\t") | {pid:.[0]|tonumber,user:.[1],cpu_pct:.[2]|tonumber?,mem_pct:.[3]|tonumber?,rss_kb:.[4]|tonumber?,uptime_sec:.[5]|tonumber?,command:.[6],disk_read_bytes:.[7]|tonumber?,disk_write_bytes:.[8]|tonumber?,ports:.[9],cgroup_path:.[10],cgroup_version:.[11],container_runtime:.[12]}'
+    | jq -R 'split("\t") | {pid:.[0]|tonumber,user:.[1],cpu_pct:.[2]|tonumber?,mem_pct:.[3]|tonumber?,rss_kb:.[4]|tonumber?,uptime_sec:.[5]|tonumber?,command:.[6],disk_read_bytes:.[7]|tonumber?,disk_write_bytes:.[8]|tonumber?,ports:.[9],cgroup_path:.[10],container_runtime:.[11]}'
 else
     printf "%b\n" "${rows[@]}" \
     | sort -t$'\t' -k4,4nr -k5,5nr \
