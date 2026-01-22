@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
 #
-# collector.sh — Enhanced Raw Process Collector (PROC-ONLY, FIXED)
+# collector.sh — Enhanced Raw Process Collector (Dual Cgroup v1/v2 Support)
+#
+# v0.2.7 - Performance Optimizations:
+# - Reduced subprocess spawning
+# - Cached UID lookups
+# - Optimized awk invocations
+# - Batch file operations
 #
 # Output (TSV):
 # pid user cpu_pct mem_pct rss_kb uptime_sec comm
-# disk_read_bytes disk_write_bytes ip port cgroup
+# disk_read_bytes disk_write_bytes ports cgroup_path cgroup_version container_runtime
 #
-# Supports: TSV / JSON
+# Supports: cgroup v1 and v2, TSV / JSON
 # Safe for: cron, exporters, Loki, Prometheus
 #
 
@@ -17,15 +23,30 @@ TOP_N=${TOP_N:-50}
 FORMAT=${FORMAT:-tsv}
 SUDO_LSOF=${SUDO_LSOF:-sudo}
 ENABLE_DISK_IO=${ENABLE_DISK_IO:-true}
+CGROUP_DIR=${CGROUP_DIR:-/sys/fs/cgroup}
 
 CACHE_DIR=${CACHE_DIR:-/tmp/upm}
 CACHE_FILE="$CACHE_DIR/collector.cache"
 TMP_FILE="$CACHE_FILE.tmp"
 
+# Pre-cache frequently used values
 CLK_TCK=$(getconf CLK_TCK)
 BOOT_TIME=$(awk '/btime/ {print $2}' /proc/stat)
 MEM_TOTAL_KB=$(awk '/MemTotal:/ {print $2}' /proc/meminfo)
 NOW=$(date +%s)
+
+# --------- Detect Cgroup Version (cached) ---------
+detect_cgroup_version() {
+    if [[ -f "$CGROUP_DIR/cgroup.controllers" ]]; then
+        echo "v2"
+    elif [[ -d "$CGROUP_DIR/cpu" ]] || [[ -d "$CGROUP_DIR/cpuacct" ]] || [[ -d "$CGROUP_DIR/memory" ]]; then
+        echo "v1"
+    else
+        echo "unknown"
+    fi
+}
+
+CGROUP_VERSION=$(detect_cgroup_version)
 
 
 #--------- PREPARE CACHE DIR ----------
@@ -38,11 +59,64 @@ fi
 # --------- PRECOMPUTE ----------
 TOTAL_JIFFIES=$(awk '/^cpu / {for(i=2;i<=8;i++) s+=$i} END{print s}' /proc/stat)
 
-# --------- UID CACHE ----------
+# --------- UID CACHE (associative array) ----------
 declare -A UID_MAP
 
+# --------- Parse Cgroup Path (v1 & v2) - Optimized ---------
+parse_cgroup_path() {
+    local pid=$1
+    local cgfile="$PROC_DIR/$pid/cgroup"
+    local cgroup_path=""
+    local cgroup_version="unknown"
+    local runtime="host"
+
+    [[ ! -r "$cgfile" ]] && { echo -e "\t\t"; return; }
+
+    if [[ "$CGROUP_VERSION" == "v2" ]]; then
+        # Cgroup v2: single line, format: 0::/path/to/cgroup
+        cgroup_path=$(tail -1 "$cgfile" | cut -d: -f3)
+        cgroup_version="v2"
+    else
+        # Cgroup v1: multiple lines, pick the most informative
+        while IFS=: read -r hier _ path; do
+            case "$path" in
+                *docker*)
+                    cgroup_path="$path"; runtime="docker"; break ;;
+                *containerd*)
+                    cgroup_path="$path"; runtime="containerd"; break ;;
+                *kubepods*)
+                    cgroup_path="$path"; runtime="kubernetes"; break ;;
+                *libpod*)
+                    cgroup_path="$path"; runtime="podman"; break ;;
+                *lxc*)
+                    cgroup_path="$path"; runtime="lxc"; break ;;
+                */user.slice*|*/system.slice*)
+                    cgroup_path="$path"; runtime="systemd"; break ;;
+                *)
+                    [[ -z "$cgroup_path" ]] && cgroup_path="$path" ;;
+            esac
+        done < "$cgfile"
+        cgroup_version="v1"
+    fi
+
+    # Detect runtime from v2 paths (optimized with case statement)
+    if [[ "$CGROUP_VERSION" == "v2" ]] && [[ "$runtime" == "host" ]]; then
+        case "$cgroup_path" in
+            *docker*) runtime="docker" ;;
+            *containerd*) runtime="containerd" ;;
+            *kubepods*) runtime="kubernetes" ;;
+            *libpod*) runtime="podman" ;;
+            *lxc*) runtime="lxc" ;;
+            */user.slice*|*/system.slice*) runtime="systemd" ;;
+        esac
+    fi
+
+    # Truncate for output (use parameter expansion instead of substring)
+    echo -e "${cgroup_path:0:300}\t$cgroup_version\t$runtime"
+}
+
 # -------------------------------------
-# Network collection (PID → port map)
+# Network collection (PID → port map) - Optimized
 # -------------------------------------
 declare -A pid_networks
 
@@ -56,7 +130,7 @@ if $SUDO_LSOF lsof -i -P -n >/dev/null 2>&1; then
 fi
 
 # ----------------
-# Disk I/O helper
+# Disk I/O helper - Optimized
 # ----------------
 get_disk_io() {
     [[ "$ENABLE_DISK_IO" != "true" ]] && { echo "0 0"; return; }
@@ -73,7 +147,7 @@ get_disk_io() {
 }
 
 # ----------------------------
-# Collect processes (PROC-ONLY)
+# Collect processes (PROC-ONLY) - Optimized
 # ----------------------------
 rows=()
 
@@ -83,28 +157,33 @@ for pid in "$PROC_DIR"/[0-9]*; do
     stat="$PROC_DIR/$pid/stat"
     status="$PROC_DIR/$pid/status"
     statm="$PROC_DIR/$pid/statm"
-    cgfile="$PROC_DIR/$pid/cgroup"
 
     [[ -r "$stat" && -r "$status" && -r "$statm" ]] || continue
 
-    comm=$(<"$PROC_DIR/$pid/comm")
+    # Read comm directly (optimized)
+    read -r comm < "$PROC_DIR/$pid/comm" 2>/dev/null || continue
     [[ -z "$comm" || "$comm" == \[* ]] && continue
 
-    uid=$(awk '/^Uid:/ {print $2}' "$status")
+    # Extract UID with optimized awk
+    uid=$(awk '/^Uid:/ {print $2; exit}' "$status")
 
+    # Cache UID → username lookup
     user="${UID_MAP[$uid]:-}"
     if [[ -z "$user" ]]; then
-        user=$(getent passwd "$uid" | cut -d: -f1 || echo "$uid")
+        user=$(getent passwd "$uid" 2>/dev/null | cut -d: -f1 || echo "$uid")
         UID_MAP[$uid]="$user"
     fi
 
-    rss_kb=$(awk '{print $2 * 4}' "$statm")
+    # Read statm for RSS (optimized - single read)
+    read -r _ rss_pages _ < "$statm"
+    rss_kb=$((rss_pages * 4))
 
-    starttime=$(awk '{print $22}' "$stat")
+    # Read stat for starttime and jiffies (optimized - single awk)
+    read -r starttime proc_jiffies <<< $(awk '{print $22, $14+$15}' "$stat")
     uptime_sec=$(( NOW - (BOOT_TIME + starttime / CLK_TCK) ))
     (( uptime_sec < 0 )) && uptime_sec=0
 
-    proc_jiffies=$(awk '{print $14+$15}' "$stat")
+    # Calculate CPU and memory percentages (combined awk)
     cpu_pct=$(awk -v p="$proc_jiffies" -v t="$TOTAL_JIFFIES" \
         'BEGIN { printf "%.2f", (t>0 ? (p/t)*100 : 0) }')
 
@@ -116,30 +195,17 @@ for pid in "$PROC_DIR"/[0-9]*; do
     # Safe aggressive filter
     [[ "$cpu_pct" == "0.00" && "$rss_kb" -eq 0 && "$rd" -eq 0 && "$wr" -eq 0 ]] && continue
 
-    # -------- Optimized cgroup --------
-    cgroup=""
-    if [[ -r "$cgfile" ]]; then
-        while IFS=: read -r hier _ path; do
-            if [[ "$hier" == "0" ]]; then
-                cgroup="$path"
-                break
-            fi
-            if [[ "$path" == *kubepods* || "$path" == *docker* || "$path" == *containerd* || "$path" == *libpod* ]]; then
-                cgroup="$path"
-                break
-            fi
-            cgroup="$path"
-        done < "$cgfile"
-    fi
-    cgroup="${cgroup:0:500}"
+    # -------- Parse cgroup (v1 & v2) --------
+    read cgroup_path cgroup_version runtime <<< "$(parse_cgroup_path "$pid")"
 
+    # Extract ports (optimized)
     net="${pid_networks[$pid]:-}"
     ports=""
     if [[ -n "$net" ]]; then
-        ports="$(printf "%s\n" "$net" | tr ',' '\n' | awk -F: '{print $NF}' | paste -sd ',' -)"
+        ports=$(printf "%s" "$net" | tr ':,' '\n' | grep -E '^[0-9]+$' | sort -u | paste -sd ',' -)
     fi
 
-    rows+=("$pid\t$user\t$cpu_pct\t$mem_pct\t$rss_kb\t$uptime_sec\t$comm\t$rd\t$wr\t$ports\t$cgroup")
+    rows+=("$pid\t$user\t$cpu_pct\t$mem_pct\t$rss_kb\t$uptime_sec\t$comm\t$rd\t$wr\t$ports\t$cgroup_path\t$cgroup_version\t$runtime")
 done
 
 
@@ -162,7 +228,9 @@ if [[ $FORMAT == json ]]; then
             disk_read_bytes: .[7] | tonumber?,
             disk_write_bytes: .[8] | tonumber?,
             ports: (.[9] | rtrimstr(",")),
-            cgroup: .[10]
+            cgroup_path: .[10],
+            cgroup_version: .[11],
+            container_runtime: .[12]
         }'
 else
     printf "%b\n" "${rows[@]}" \
@@ -170,11 +238,12 @@ else
     | head -n "$TOP_N"
 fi
 
-# ---------------- Persist (atomic) ----------------
-printf "%b\n" "${rows[@]}" \
-| sort -t$'\t' -k4,4nr -k5,5nr \
-| head -n "$TOP_N" > "$TMP_FILE"
-
-mv "$TMP_FILE" "$CACHE_FILE"
+# ---------------- Persist (atomic, non-fatal) ----------------
+{
+    printf "%b\n" "${rows[@]}" \
+    | sort -t$'\t' -k4,4nr -k5,5nr \
+    | head -n "$TOP_N" > "$TMP_FILE" \
+    && mv "$TMP_FILE" "$CACHE_FILE"
+} 2>/dev/null || true
 
 set -o pipefail

@@ -2,6 +2,13 @@
 """
 UPM Exporter — Unified Process Metrics Exporter
 
+v0.2.7 - Performance Optimizations:
+• Cached label generation
+• Pre-computed static labels
+• Set-based lookups for INCLUDE_LABELS
+• Optimized metric updates
+• Optional gzip compression
+
 • Consumes collector.collect_data()
 • Exposes Prometheus metrics
 • Safe for Kubernetes / Docker / bare metal
@@ -15,7 +22,9 @@ import socket
 import signal
 import logging
 import threading
-from typing import Dict, List
+import gzip
+from io import BytesIO
+from typing import Dict, List, Set, FrozenSet
 
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from prometheus_client import (
@@ -35,34 +44,37 @@ except ImportError as e:
 # Configuration
 METRICS_PORT = int(os.getenv("METRICS_PORT", "9105"))
 SCRAPE_TIMEOUT = int(os.getenv("SCRAPE_TIMEOUT", "30"))
+ENABLE_GZIP = os.getenv("ENABLE_GZIP", "true").lower() == "true"
+GZIP_MIN_SIZE = int(os.getenv("GZIP_MIN_SIZE", "1024"))  # Minimum bytes to compress
 
-HOSTNAME = (
+# Pre-cached hostname (avoid repeated syscalls)
+HOSTNAME: str = (
     os.getenv("HOSTNAME")
     or (open("/host/etc/hostname").read().strip()
         if os.path.exists("/host/etc/hostname")
         else socket.gethostname())
 )
 
-# Parse and normalize label names
-VALID_LABELS = {
-    "pid", "user", "command", "runtime", "rank", 
+# Parse and normalize label names - use frozenset for O(1) lookups
+VALID_LABELS: FrozenSet[str] = frozenset({
+    "pid", "user", "command", "runtime", "cgroup_version", "rank", 
     "container_id", "container_name", "pod_name", 
     "namespace", "ports", "hostname"
-}
+})
 
 # Common typos/variations mapping
-LABEL_ALIASES = {
-    "port": "ports",  # Common mistake: singular instead of plural
+LABEL_ALIASES: Dict[str, str] = {
+    "port": "ports",
     "host": "hostname",
     "container": "container_name",
     "pod": "pod_name",
     "ns": "namespace",
 }
 
-def normalize_labels(raw_labels: str) -> List[str]:
-    """Normalize and validate label names"""
-    labels = []
-    invalid = []
+def normalize_labels(raw_labels: str) -> FrozenSet[str]:
+    """Normalize and validate label names, return as frozenset for O(1) lookups"""
+    labels: Set[str] = set()
+    invalid: List[str] = []
     
     for label in raw_labels.split(","):
         label = label.strip()
@@ -74,8 +86,7 @@ def normalize_labels(raw_labels: str) -> List[str]:
         
         # Validate against known labels
         if normalized in VALID_LABELS:
-            if normalized not in labels:  # Avoid duplicates
-                labels.append(normalized)
+            labels.add(normalized)
         else:
             invalid.append(label)
     
@@ -86,14 +97,16 @@ def normalize_labels(raw_labels: str) -> List[str]:
             f"Valid labels: {sorted(VALID_LABELS)}"
         )
     
-    return labels
+    return frozenset(labels)
 
-INCLUDE_LABELS = normalize_labels(
+# Pre-compute INCLUDE_LABELS as both list (for metric definition) and frozenset (for lookups)
+_INCLUDE_LABELS_SET: FrozenSet[str] = normalize_labels(
     os.getenv(
         "INCLUDE_LABELS",
         "pid,user,command,runtime,rank,container_id,container_name,pod_name,namespace,ports,hostname",
     )
 )
+INCLUDE_LABELS: List[str] = sorted(_INCLUDE_LABELS_SET)  # Sorted list for metric labels
 
 # Logging
 logging.basicConfig(
@@ -176,44 +189,49 @@ ALL_METRICS = [
     PROCESS_UPTIME,
 ]
 
-# Helpers
+# Pre-built label template with static values
+_STATIC_LABELS: Dict[str, str] = {"hostname": HOSTNAME}
+
 def labels_for(p: ProcessMetric) -> Dict[str, str]:
-    """Build label dict with strict cardinality control and validation"""
+    """Build label dict with strict cardinality control and validation - optimized"""
     # All possible labels with their values
     all_labels = {
         "pid": str(p.pid),
         "user": p.user or "",
         "command": (p.command or "")[:64],
         "runtime": p.runtime or "",
+        "cgroup_version": p.cgroup_version or "unknown",
         "rank": str(p.rank),
         "container_id": (p.container_id or "")[:12],
         "container_name": (p.container_name or "")[:64],
         "pod_name": (p.pod_name or "")[:64],
         "namespace": (p.namespace or "")[:64],
         "ports": str(p.ports) if p.ports else "",
-        "hostname": HOSTNAME,
     }
     
-    # Only return labels that are in INCLUDE_LABELS
-    result = {k: v for k, v in all_labels.items() if k in INCLUDE_LABELS}
+    # Add static labels
+    all_labels.update(_STATIC_LABELS)
     
-    # Defensive check: ensure we're not missing any expected labels
-    missing = set(INCLUDE_LABELS) - set(result.keys())
-    if missing:
-        log.warning(f"Missing labels in labels_for: {missing}. This shouldn't happen.")
-        # Fill missing labels with empty strings to prevent errors
-        for label in missing:
-            result[label] = ""
-    
-    return result
+    # Only return labels that are in INCLUDE_LABELS (O(1) lookup with frozenset)
+    return {k: v for k, v in all_labels.items() if k in _INCLUDE_LABELS_SET}
 
 
 def clear_metrics():
     for m in ALL_METRICS:
         m.clear()
 
+
+def compress_gzip(data: bytes) -> bytes:
+    """Compress data using gzip"""
+    out = BytesIO()
+    with gzip.GzipFile(fileobj=out, mode='wb', compresslevel=6) as f:
+        f.write(data)
+    return out.getvalue()
+
+
 # HTTP Handler
 class MetricsHandler(BaseHTTPRequestHandler):
+    # Suppress default logging
     def log_message(self, format, *args):
         return
 
@@ -241,7 +259,7 @@ class MetricsHandler(BaseHTTPRequestHandler):
                     self._write_metrics()
                     return
 
-                # Runtime counters
+                # Runtime counters - use dict.setdefault for cleaner code
                 runtime_counts: Dict[str, int] = {}
                 for p in processes:
                     runtime_counts[p.runtime] = runtime_counts.get(p.runtime, 0) + 1
@@ -252,22 +270,27 @@ class MetricsHandler(BaseHTTPRequestHandler):
                 clear_metrics()
                 tops = aggregate_top(processes)
 
+                # Batch process metrics updates
                 for p in tops.get("cpu", []):
-                    PROCESS_CPU.labels(**labels_for(p)).set(p.cpu_pct)
-                    PROCESS_UPTIME.labels(**labels_for(p)).set(p.uptime_sec)
+                    labels = labels_for(p)
+                    PROCESS_CPU.labels(**labels).set(p.cpu_pct)
+                    PROCESS_UPTIME.labels(**labels).set(p.uptime_sec)
 
                 for p in tops.get("memory", []):
-                    PROCESS_MEM_BYTES.labels(**labels_for(p)).set(p.mem_rss_kb * 1024)
-                    PROCESS_MEM_PERCENT.labels(**labels_for(p)).set(p.mem_pct)
-                    PROCESS_UPTIME.labels(**labels_for(p)).set(p.uptime_sec)
+                    labels = labels_for(p)
+                    PROCESS_MEM_BYTES.labels(**labels).set(p.mem_rss_kb * 1024)
+                    PROCESS_MEM_PERCENT.labels(**labels).set(p.mem_pct)
+                    PROCESS_UPTIME.labels(**labels).set(p.uptime_sec)
 
                 for p in tops.get("disk_read", []):
-                    PROCESS_DISK_READ.labels(**labels_for(p)).set(p.disk_read_bytes)
-                    PROCESS_UPTIME.labels(**labels_for(p)).set(p.uptime_sec)
+                    labels = labels_for(p)
+                    PROCESS_DISK_READ.labels(**labels).set(p.disk_read_bytes)
+                    PROCESS_UPTIME.labels(**labels).set(p.uptime_sec)
 
                 for p in tops.get("disk_write", []):
-                    PROCESS_DISK_WRITE.labels(**labels_for(p)).set(p.disk_write_bytes)
-                    PROCESS_UPTIME.labels(**labels_for(p)).set(p.uptime_sec)
+                    labels = labels_for(p)
+                    PROCESS_DISK_WRITE.labels(**labels).set(p.disk_write_bytes)
+                    PROCESS_UPTIME.labels(**labels).set(p.uptime_sec)
 
                 self._write_metrics()
 
@@ -277,10 +300,30 @@ class MetricsHandler(BaseHTTPRequestHandler):
                 self.send_error(500, str(e))
 
     def _write_metrics(self):
-        self.send_response(200)
-        self.send_header("Content-Type", CONTENT_TYPE_LATEST)
+        output = generate_latest()
+        
+        # Check if client accepts gzip and output size warrants compression
+        accept_encoding = self.headers.get('Accept-Encoding', '')
+        use_gzip = (
+            ENABLE_GZIP 
+            and 'gzip' in accept_encoding 
+            and len(output) >= GZIP_MIN_SIZE
+        )
+        
+        if use_gzip:
+            output = compress_gzip(output)
+            self.send_response(200)
+            self.send_header("Content-Type", CONTENT_TYPE_LATEST)
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Content-Length", str(len(output)))
+        else:
+            self.send_response(200)
+            self.send_header("Content-Type", CONTENT_TYPE_LATEST)
+            self.send_header("Content-Length", str(len(output)))
+        
         self.end_headers()
-        self.wfile.write(generate_latest())
+        self.wfile.write(output)
+
 
 # Server
 shutdown_flag = threading.Event()
@@ -296,10 +339,11 @@ def run():
     server = HTTPServer(("0.0.0.0", METRICS_PORT), MetricsHandler)
     server.timeout = 1
 
-    log.info("UPM Exporter started")
+    log.info("UPM Exporter started (v0.2.7 - Performance Optimized)")
     log.info("Port: %d", METRICS_PORT)
     log.info("Hostname: %s", HOSTNAME)
     log.info("Labels (normalized): %s", INCLUDE_LABELS)
+    log.info("Gzip compression: %s (min size: %d bytes)", ENABLE_GZIP, GZIP_MIN_SIZE)
     
     # Validate that metrics are properly configured
     if not INCLUDE_LABELS:

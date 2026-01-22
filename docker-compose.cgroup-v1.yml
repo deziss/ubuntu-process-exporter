@@ -1,4 +1,5 @@
-# docker-compose.yml
+# docker-compose.cgroup-v1.yml
+# Alternative configuration for cgroup v1-only systems
 
 services:
   ubuntu-process-exporter:
@@ -10,7 +11,14 @@ services:
     read_only: true
     volumes:
       - /proc:/host/proc:ro
+      # Cgroup v1 subsystems
       - /sys/fs/cgroup:/sys/fs/cgroup:ro
+      # Individual v1 mounts (explicit):
+      - /sys/fs/cgroup/cpu:/sys/fs/cgroup/cpu:ro
+      - /sys/fs/cgroup/memory:/sys/fs/cgroup/memory:ro
+      - /sys/fs/cgroup/cpuacct:/sys/fs/cgroup/cpuacct:ro
+      - /sys/fs/cgroup/cpuset:/sys/fs/cgroup/cpuset:ro
+      - /sys/fs/cgroup/pids:/sys/fs/cgroup/pids:ro
       - /etc/hostname:/host/etc/hostname:ro
       - /var/lib/docker/containers:/var/lib/docker/containers:ro
     tmpfs:
@@ -18,13 +26,13 @@ services:
       - /run
 
     environment:
-      PROC_DIR: /proc
+      PROC_DIR: /host/proc
       METRICS_PORT: "9106"
       SCRAPE_TIMEOUT: "300"
-      TOP_N: "25" ## if this increase then metrics scrapping gone slow respectively
+      TOP_N: "25"
       ENABLE_DISK_IO: "true"
-      # Label control (OPTIONAL)
-      # INCLUDE_LABELS: pid,command,container_name,runtime,hostname,ports
+      # For cgroup v1 systems, you may need to enable docker socket
+      # DOCKER_HOST: unix:///var/run/docker.sock
 
     restart: unless-stopped
 
