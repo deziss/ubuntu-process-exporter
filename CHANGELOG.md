@@ -1,5 +1,16 @@
 # Changelog - Process Exporter
 
+## v0.3.6 - Instant CPU & Accuracy (2026-01-22)
+
+### Changes
+
+- **Instant CPU Sampling**: Implemented "Double Sampling" technique (0.5s interval)
+- **Accurate CPU %**: Fixed "0.0%" issue for long-running processes by measuring delta instead of lifetime average
+- **Smart Logic**: Maintains v0.3.5 performance optimizations while adding accuracy
+- **Robust**: Fixed potential unbound variable issues
+
+---
+
 ## v0.3.5 - Metadata Restoration (2026-01-22)
 
 ### Changes
