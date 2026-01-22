@@ -1,74 +1,153 @@
 #!/usr/bin/env bash
 #
-# collector.sh — Process Collector (Dual Cgroup v1/v2 Support)
+# collector.sh — Enhanced Raw Process Collector (Based on v0.2.4)
 #
-# v0.2.9 - Simplified for cgroup v1 compatibility:
-# - Removed lsof dependency (optional, non-blocking)
-# - Simplified cgroup parsing
-# - Faster iteration with fewer subshells
+# v0.3.0 - Restored fast v0.2.4 logic with cgroup v1/v2 compatibility
 #
 # Output (TSV):
 # pid user cpu_pct mem_pct rss_kb uptime_sec comm
 # disk_read_bytes disk_write_bytes ports cgroup_path cgroup_version container_runtime
 #
+# Supports: TSV / JSON, cgroup v1 and v2
+# Safe for: cron, exporters, Loki, Prometheus
+#
 
-set -uo pipefail
+set -euo pipefail
 
 PROC_DIR=${PROC_DIR:-/proc}
 TOP_N=${TOP_N:-50}
 FORMAT=${FORMAT:-tsv}
+SUDO_LSOF=${SUDO_LSOF:-sudo}
 ENABLE_DISK_IO=${ENABLE_DISK_IO:-true}
 CGROUP_DIR=${CGROUP_DIR:-/sys/fs/cgroup}
 
-# Use /proc directly for system-wide stats (even if PROC_DIR is /host/proc)
-SYS_PROC="/proc"
-[[ -f "$PROC_DIR/stat" ]] && SYS_PROC="$PROC_DIR"
+CACHE_DIR=${CACHE_DIR:-/tmp/upm}
+CACHE_FILE="$CACHE_DIR/collector.cache"
+TMP_FILE="$CACHE_FILE.tmp"
 
-# Pre-cache system values
-CLK_TCK=$(getconf CLK_TCK 2>/dev/null || echo 100)
-BOOT_TIME=$(awk '/btime/ {print $2}' "$SYS_PROC/stat" 2>/dev/null || echo 0)
-MEM_TOTAL_KB=$(awk '/MemTotal:/ {print $2}' "$SYS_PROC/meminfo" 2>/dev/null || echo 1)
+CLK_TCK=$(getconf CLK_TCK)
+BOOT_TIME=$(awk '/btime/ {print $2}' /proc/stat)
+MEM_TOTAL_KB=$(awk '/MemTotal:/ {print $2}' /proc/meminfo)
 NOW=$(date +%s)
-TOTAL_JIFFIES=$(awk '/^cpu / {for(i=2;i<=8;i++) s+=$i} END{print s+0}' "$SYS_PROC/stat" 2>/dev/null || echo 1)
 
-# --------- Detect Cgroup Version ---------
+# Detect cgroup version once at start
 if [[ -f "$CGROUP_DIR/cgroup.controllers" ]]; then
     CGROUP_VERSION="v2"
-elif [[ -d "$CGROUP_DIR/cpu" ]] || [[ -d "$CGROUP_DIR/cpuacct" ]] || [[ -d "$CGROUP_DIR/memory" ]]; then
-    CGROUP_VERSION="v1"
 else
-    CGROUP_VERSION="unknown"
+    CGROUP_VERSION="v1"
 fi
 
-# --------- UID CACHE ----------
-declare -A UID_MAP 2>/dev/null || true
+#--------- PREPARE CACHE DIR ----------
+if command -v sudo >/dev/null 2>&1 && [[ -n "${SUDO_LSOF:-}" ]]; then
+    [[ -d "$CACHE_DIR" ]] || sudo mkdir -p "$CACHE_DIR" 2>/dev/null || mkdir -p "$CACHE_DIR" 2>/dev/null || true
+else
+    [[ -d "$CACHE_DIR" ]] || mkdir -p "$CACHE_DIR" 2>/dev/null || true
+fi
 
-# --------- Simple cgroup parser ---------
-get_cgroup_info() {
-    local cgfile="$1"
-    local cgroup_path="" runtime="host"
-    
-    if [[ ! -r "$cgfile" ]]; then
-        echo "/ $CGROUP_VERSION host"
-        return
-    fi
-    
-    # Just read first line for v2, first few for v1
-    local content
-    content=$(head -5 "$cgfile" 2>/dev/null) || content=""
-    
-    if [[ "$CGROUP_VERSION" == "v2" ]]; then
-        cgroup_path=$(echo "$content" | head -1 | cut -d: -f3)
+# --------- PRECOMPUTE ----------
+TOTAL_JIFFIES=$(awk '/^cpu / {for(i=2;i<=8;i++) s+=$i} END{print s}' /proc/stat)
+
+# --------- UID CACHE ----------
+declare -A UID_MAP
+
+# -------------------------------------
+# Network collection (PID → port map)
+# Skip if SUDO_LSOF is empty
+# -------------------------------------
+declare -A pid_networks
+
+if [[ -n "${SUDO_LSOF:-}" ]] && $SUDO_LSOF lsof -i -P -n >/dev/null 2>&1; then
+    while read -r _ pid _ _ _ _ _ _ name; do
+        [[ $name == *:* ]] || continue
+        port="${name##*:}"
+        [[ $port =~ ^[0-9]+$ ]] || continue
+        pid_networks[$pid]="${pid_networks[$pid]:-}:$port,"
+    done < <($SUDO_LSOF lsof -i -P -n 2>/dev/null | grep -E 'LISTEN|UDP')
+fi
+
+# ----------------
+# Disk I/O helper
+# ----------------
+get_disk_io() {
+    [[ "$ENABLE_DISK_IO" != "true" ]] && { echo "0 0"; return; }
+    local io="$PROC_DIR/$1/io"
+    if [[ -r "$io" ]]; then
+        awk '
+          /read_bytes:/  {r=$2}
+          /write_bytes:/ {w=$2}
+          END {print r+0, w+0}
+        ' "$io" 2>/dev/null
     else
-        # v1: find container path
-        cgroup_path=$(echo "$content" | grep -m1 -oE '/(docker|containerd|kubepods|libpod|lxc)/[^[:space:]]*' || echo "/")
-        if [[ -z "$cgroup_path" ]]; then
-            cgroup_path=$(echo "$content" | head -1 | cut -d: -f3)
-        fi
+        echo "0 0"
     fi
+}
+
+# ----------------------------
+# Collect processes (PROC-ONLY)
+# ----------------------------
+rows=()
+
+for pid in "$PROC_DIR"/[0-9]*; do
+    pid="${pid##*/}"
+
+    stat="$PROC_DIR/$pid/stat"
+    status="$PROC_DIR/$pid/status"
+    statm="$PROC_DIR/$pid/statm"
+    cgfile="$PROC_DIR/$pid/cgroup"
+
+    [[ -r "$stat" && -r "$status" && -r "$statm" ]] || continue
+
+    comm=$(<"$PROC_DIR/$pid/comm")
+    [[ -z "$comm" || "$comm" == \[* ]] && continue
+
+    uid=$(awk '/^Uid:/ {print $2}' "$status")
+
+    user="${UID_MAP[$uid]:-}"
+    if [[ -z "$user" ]]; then
+        user=$(getent passwd "$uid" | cut -d: -f1 || echo "$uid")
+        UID_MAP[$uid]="$user"
+    fi
+
+    rss_kb=$(awk '{print $2 * 4}' "$statm")
+
+    starttime=$(awk '{print $22}' "$stat")
+    uptime_sec=$(( NOW - (BOOT_TIME + starttime / CLK_TCK) ))
+    (( uptime_sec < 0 )) && uptime_sec=0
+
+    proc_jiffies=$(awk '{print $14+$15}' "$stat")
+    cpu_pct=$(awk -v p="$proc_jiffies" -v t="$TOTAL_JIFFIES" \
+        'BEGIN { printf "%.2f", (t>0 ? (p/t)*100 : 0) }')
+
+    mem_pct=$(awk -v r="$rss_kb" -v t="$MEM_TOTAL_KB" \
+        'BEGIN { printf "%.2f", (t>0 ? (r/t)*100 : 0) }')
+
+    read rd wr <<< "$(get_disk_io "$pid")"
+
+    # Safe aggressive filter
+    [[ "$cpu_pct" == "0.00" && "$rss_kb" -eq 0 && "$rd" -eq 0 && "$wr" -eq 0 ]] && continue
+
+    # -------- Optimized cgroup with runtime detection --------
+    cgroup=""
+    runtime="host"
+    if [[ -r "$cgfile" ]]; then
+        while IFS=: read -r hier _ path; do
+            # cgroup v2 uses hier=0
+            if [[ "$hier" == "0" ]]; then
+                cgroup="$path"
+                break
+            fi
+            # cgroup v1 - look for container paths
+            if [[ "$path" == *kubepods* || "$path" == *docker* || "$path" == *containerd* || "$path" == *libpod* ]]; then
+                cgroup="$path"
+                break
+            fi
+            cgroup="$path"
+        done < "$cgfile"
+    fi
+    cgroup="${cgroup:0:500}"
     
-    # Detect runtime from path
-    case "$cgroup_path" in
+    # Detect runtime from cgroup path
+    case "$cgroup" in
         *docker*) runtime="docker" ;;
         *containerd*) runtime="containerd" ;;
         *kubepods*) runtime="kubernetes" ;;
@@ -76,104 +155,52 @@ get_cgroup_info() {
         *lxc*) runtime="lxc" ;;
         */user.slice*|*/system.slice*) runtime="systemd" ;;
     esac
-    
-    echo "${cgroup_path:0:300} $CGROUP_VERSION $runtime"
-}
 
-# ----------------------------
-# Collect processes
-# ----------------------------
-rows=()
-count=0
-max_pids=500  # Limit to avoid timeouts
+    net="${pid_networks[$pid]:-}"
+    ports=""
+    if [[ -n "$net" ]]; then
+        ports="$(printf "%s\n" "$net" | tr ',' '\n' | awk -F: '{print $NF}' | paste -sd ',' -)"
+    fi
 
-for piddir in "$PROC_DIR"/[0-9]*; do
-    [[ -d "$piddir" ]] || continue
-    (( count++ > max_pids )) && break
-    
-    pid="${piddir##*/}"
-    
-    # Quick existence check
-    [[ -r "$piddir/stat" ]] || continue
-    [[ -r "$piddir/status" ]] || continue
-    [[ -r "$piddir/statm" ]] || continue
-    
-    # Read comm
-    comm=""
-    read -r comm < "$piddir/comm" 2>/dev/null || continue
-    [[ -z "$comm" || "$comm" == \[* ]] && continue
-    
-    # Get UID
-    uid=$(awk '/^Uid:/ {print $2; exit}' "$piddir/status" 2>/dev/null)
-    [[ -z "$uid" ]] && continue
-    
-    # Username (cached or fallback to UID)
-    user="${UID_MAP[$uid]:-}"
-    if [[ -z "$user" ]]; then
-        user=$(getent passwd "$uid" 2>/dev/null | cut -d: -f1) || user="$uid"
-        [[ -z "$user" ]] && user="$uid"
-        UID_MAP[$uid]="$user" 2>/dev/null || true
-    fi
-    
-    # RSS from statm
-    read -r _ rss_pages _ < "$piddir/statm" 2>/dev/null || continue
-    rss_kb=$((rss_pages * 4))
-    
-    # Parse stat file for jiffies and starttime
-    stat_content=$(<"$piddir/stat" 2>/dev/null) || continue
-    # Extract fields after command (which may contain spaces/parens)
-    stat_fields="${stat_content#*(*)}"
-    
-    # Get starttime (field 22 after the command) and jiffies (14+15)
-    set -- $stat_fields
-    utime=${12:-0}
-    stime=${13:-0}
-    starttime=${20:-0}
-    
-    proc_jiffies=$((utime + stime))
-    uptime_sec=$((NOW - (BOOT_TIME + starttime / CLK_TCK)))
-    (( uptime_sec < 0 )) && uptime_sec=0
-    
-    # CPU and memory percentages
-    if (( TOTAL_JIFFIES > 0 )); then
-        cpu_pct=$(awk "BEGIN {printf \"%.2f\", ($proc_jiffies/$TOTAL_JIFFIES)*100}")
-    else
-        cpu_pct="0.00"
-    fi
-    
-    if (( MEM_TOTAL_KB > 0 )); then
-        mem_pct=$(awk "BEGIN {printf \"%.2f\", ($rss_kb/$MEM_TOTAL_KB)*100}")
-    else
-        mem_pct="0.00"
-    fi
-    
-    # Disk I/O (optional)
-    rd=0 wr=0
-    if [[ "$ENABLE_DISK_IO" == "true" ]] && [[ -r "$piddir/io" ]]; then
-        eval $(awk '/read_bytes:/ {print "rd="$2} /write_bytes:/ {print "wr="$2}' "$piddir/io" 2>/dev/null)
-    fi
-    
-    # Filter zero-everything processes
-    [[ "$cpu_pct" == "0.00" && "$rss_kb" -eq 0 && "$rd" -eq 0 && "$wr" -eq 0 ]] && continue
-    
-    # Cgroup info
-    read -r cgroup_path cgroup_version runtime <<< "$(get_cgroup_info "$piddir/cgroup")"
-    
-    rows+=("$pid\t$user\t$cpu_pct\t$mem_pct\t$rss_kb\t$uptime_sec\t$comm\t$rd\t$wr\t\t${cgroup_path:-/}\t${cgroup_version:-unknown}\t${runtime:-host}")
+    rows+=("$pid\t$user\t$cpu_pct\t$mem_pct\t$rss_kb\t$uptime_sec\t$comm\t$rd\t$wr\t$ports\t$cgroup\t$CGROUP_VERSION\t$runtime")
 done
 
-# Exit if no data
-[[ ${#rows[@]} -eq 0 ]] && exit 0
 
-# Output
 set +o pipefail
+
 if [[ $FORMAT == json ]]; then
     printf "%b\n" "${rows[@]}" \
     | sort -t$'\t' -k4,4nr -k5,5nr \
     | head -n "$TOP_N" \
-    | jq -R 'split("\t") | {pid:.[0]|tonumber,user:.[1],cpu_pct:.[2]|tonumber?,mem_pct:.[3]|tonumber?,rss_kb:.[4]|tonumber?,uptime_sec:.[5]|tonumber?,command:.[6],disk_read_bytes:.[7]|tonumber?,disk_write_bytes:.[8]|tonumber?,ports:.[9],cgroup_path:.[10],cgroup_version:.[11],container_runtime:.[12]}'
+    | jq -R '
+        split("\t") |
+        {
+            pid: .[0] | tonumber,
+            user: .[1],
+            cpu_pct: .[2] | tonumber?,
+            mem_pct: .[3] | tonumber?,
+            rss_kb: .[4] | tonumber?,
+            uptime_sec: .[5] | tonumber?,
+            command: .[6],
+            disk_read_bytes: .[7] | tonumber?,
+            disk_write_bytes: .[8] | tonumber?,
+            ports: (.[9] | rtrimstr(",")),
+            cgroup_path: .[10],
+            cgroup_version: .[11],
+            container_runtime: .[12]
+        }'
 else
     printf "%b\n" "${rows[@]}" \
     | sort -t$'\t' -k4,4nr -k5,5nr \
     | head -n "$TOP_N"
 fi
+
+# ---------------- Persist (atomic, non-fatal) ----------------
+{
+    printf "%b\n" "${rows[@]}" \
+    | sort -t$'\t' -k4,4nr -k5,5nr \
+    | head -n "$TOP_N" > "$TMP_FILE" \
+    && mv "$TMP_FILE" "$CACHE_FILE"
+} 2>/dev/null || true
+
+set -o pipefail
