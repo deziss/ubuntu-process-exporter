@@ -1,5 +1,15 @@
 # Changelog - Process Exporter
 
+## v0.3.8 - Stable Release (2026-01-23)
+
+### Changes
+
+- **Rollback to v0.3.6 CPU Logic**: User-verified working CPU calculation
+- **Confirmed on cgroup v1**: Real CPU values (95%, 42%, etc.) displayed correctly
+- **This is the recommended stable version**
+
+---
+
 ## v0.3.7 - Robust CPU Calculation (2026-01-23)
 
 ### Changes
