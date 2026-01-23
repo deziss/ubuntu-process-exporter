@@ -2,7 +2,7 @@
 
 services:
   ubuntu-process-exporter:
-    image: deziss/ubuntu-process-exporter:v0.5.3
+    image: deziss/ubuntu-process-exporter:v0.5.1
     privileged: true
     pid: host
     network_mode: host  ## if it is 'host' comment ports

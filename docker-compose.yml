@@ -18,7 +18,7 @@ services:
       - /run
 
     environment:
-      PROC_DIR: /host/proc
+      PROC_DIR: /proc
       METRICS_PORT: "9106"
       SCRAPE_TIMEOUT: "300"
       TOP_N: "25" ## if this increase then metrics scrapping gone slow respectively

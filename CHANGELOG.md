@@ -1,6 +1,19 @@
 # Changelog - Process Exporter
 
-## v0.5.1 - Cleanup Release (2026-01-23)
+## v0.5.3 - Two-Pass Optimization (2026-01-23)
+
+### Changes
+
+- **Two-Pass Architecture**:
+  - **Phase 1**: Fast scan of all PIDs collecting ONLY metrics (CPU, Mem, Disk).
+  - **Filter**: Drop inactive/irrelevant processes immediately.
+  - **Phase 2**: Expensive metadata collection (Cgroups, Ports, Usernames) runs ONLY on the selected Top N processes.
+- **Performance**: Drastically reduces overhead on systems with many idle containers or processes.
+- **Union Selection**: Preserves the Top N processes for CPU, Memory, and Disk independently before enriching.
+
+---
+
+## v0.5.2 - Config Hotfix (2026-01-23)
 
 ### Changes
 
