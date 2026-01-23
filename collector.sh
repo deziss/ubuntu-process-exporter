@@ -1,14 +1,11 @@
 #!/usr/bin/env bash
 #
-# collector.sh — Ultra-Optimized Process Collector (v0.4.1)
+# collector.sh — Ultra-Optimized Process Collector (v0.4.2)
 #
-# v0.4.1 - High-Performance Architecture:
-# 1. Snapshot CPU ticks
-# 2. Sleep (delta CPU)
-# 3. Scan all PIDs (FAST): cpu, mem, disk → filter inactive → store ACTIVE_PIDS
-# 4. Build inode → port map ONCE
-# 5. Scan ports ONLY for ACTIVE_PIDS
-# 6. Output / sort / export
+# v0.4.2 - Field Fixes:
+# - Empty string for missing ports (not "/")
+# - Proper field ordering
+# - High-performance /proc/net port scanning
 #
 
 set -uo pipefail
@@ -30,6 +27,7 @@ BOOT_TIME=$(awk '/btime/ {print $2}' "$SYS_PROC/stat" 2>/dev/null || echo 0)
 MEM_TOTAL_KB=$(awk '/MemTotal:/ {print $2}' "$SYS_PROC/meminfo" 2>/dev/null || echo 1)
 NOW=$(date +%s)
 NUM_CORES=$(grep -c ^processor "$SYS_PROC/cpuinfo" 2>/dev/null || echo 1)
+TAB=$'\t'
 
 # --- UID cache ---
 declare -A UID_MAP
@@ -171,7 +169,8 @@ for piddir in "$PROC_DIR"/[0-9]*; do
 
     # Store active PID data
     ACTIVE_PIDS+=("$pid")
-    ACTIVE_DATA[$pid]="$user\t$cpu_pct\t$mem_pct\t$rss_kb\t$uptime_sec\t$comm\t$rd\t$wr\t$cgroup_path\t$runtime"
+    # Use real TAB character so 'read' can split it correctly in Phase 3 (variables contain spaces)
+    ACTIVE_DATA[$pid]="${user}${TAB}${cpu_pct}${TAB}${mem_pct}${TAB}${rss_kb}${TAB}${uptime_sec}${TAB}${comm}${TAB}${rd}${TAB}${wr}${TAB}${cgroup_path}${TAB}${runtime}"
 done
 
 [[ ${#ACTIVE_PIDS[@]} -eq 0 ]] && exit 0

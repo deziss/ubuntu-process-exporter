@@ -2,9 +2,9 @@
 """
 Ultra-Optimized Exporter
 
-v0.4.0 - Full Feature Set:
-- All labels: pid, user, command, runtime, rank, container_id, container_name, cgroup_path, ports, hostname
-- Gzip compression support
+v0.4.2 - Field Fixes:
+- Empty string for missing values
+- Proper label handling
 - Fast metric updates
 """
 

@@ -2,10 +2,10 @@
 """
 Ultra-Optimized Process Collector
 
-v0.4.0 - Full Feature Set:
-- 12-field TSV parsing (pid, user, cpu, mem, rss, uptime, comm, rd, wr, ports, cgroup, runtime)
-- Regex-based container metadata extraction
-- Ports field support
+v0.4.2 - Field Fixes:
+- Empty string for missing ports
+- Empty string for missing cgroup_path (not "/")
+- Proper field ordering
 """
 
 import subprocess
@@ -111,19 +111,20 @@ def collect_data() -> List[ProcessMetric]:
         
         try:
             # Parse basic fields
+            # Output: pid, user, cpu_pct, mem_pct, rss_kb, uptime_sec, comm, rd, wr, ports, cgroup_path, runtime
             pm = ProcessMetric(
                 pid=int(parts[0]),
-                user=parts[1],
-                command=parts[6],
+                user=parts[1] or "",
+                command=parts[6] or "",
                 cpu_pct=float(parts[2]) if parts[2] else 0.0,
                 mem_pct=float(parts[3]) if parts[3] else 0.0,
                 mem_rss_kb=int(parts[4]) if parts[4] else 0,
                 disk_read_bytes=int(parts[7]) if parts[7] else 0,
                 disk_write_bytes=int(parts[8]) if parts[8] else 0,
-                ports=parts[9] or "",
-                cgroup_path=parts[10][:300] if parts[10] else "/",
+                ports=parts[9] if parts[9] and parts[9] != "/" else "",
+                cgroup_path=parts[10][:300] if parts[10] and parts[10] != "/" else "",
                 uptime_sec=int(parts[5]) if parts[5] else 0,
-                runtime=parts[11] or "host",
+                runtime=parts[11] if parts[11] else "host",
             )
             
             # Enrich with Metadata (Option B)

@@ -1,5 +1,16 @@
 # Changelog - Process Exporter
 
+## v0.4.2 - Field Fixes (2026-01-23)
+
+### Changes
+
+- **Fixed Output Alignment**: Ports field (pos 10) correctly inserted even when empty
+- **Empty Values**: Ports returns empty string instead of "/" or being skipped
+- **Robust Parsing**: Collector ensures 12 fields are always present with correct delimiters
+- **Clean output**: Removed unnecessary separators when fields are empty
+
+---
+
 ## v0.4.1 - High-Performance Port Scanning (2026-01-23)
 
 ### Changes
