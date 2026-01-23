@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 #
-# collector.sh — Ultra-Optimized Process Collector (v0.3.6)
+# collector.sh — Ultra-Optimized Process Collector (v0.4.0)
 #
-# v0.3.6 - Instant CPU Usage:
-# - Implements "Double Sampling" technique for accurate CPU %
-# - Calculates delta over 0.5s interval
-# - Corrects "0.0%" issue for long-running processes
-# - Maintains v0.3.5 optimizations (pure bash math, regex metadata)
+# v0.4.0 - Full Feature Set:
+# - Instant CPU via Double Sampling
+# - Port collection via lsof
+# - Container metadata extraction
+# - 12-field TSV output
 #
 
 set -uo pipefail

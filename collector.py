@@ -2,11 +2,10 @@
 """
 Ultra-Optimized Process Collector
 
-v0.3.5 - Maximum Performance + Metadata:
-- Minimal parsing overhead
-- Regex-based container metadata resolution (No external calls)
-- Direct attribute assignment
-- Simplified data structures
+v0.4.0 - Full Feature Set:
+- 12-field TSV parsing (pid, user, cpu, mem, rss, uptime, comm, rd, wr, ports, cgroup, runtime)
+- Regex-based container metadata extraction
+- Ports field support
 """
 
 import subprocess

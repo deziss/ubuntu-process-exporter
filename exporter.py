@@ -2,11 +2,10 @@
 """
 Ultra-Optimized Exporter
 
-v0.3.3 - Maximum Performance:
-- Direct collector integration
-- Minimal label overhead
-- Fast metric updates
+v0.4.0 - Full Feature Set:
+- All labels: pid, user, command, runtime, rank, container_id, container_name, cgroup_path, ports, hostname
 - Gzip compression support
+- Fast metric updates
 """
 
 import os

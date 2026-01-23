@@ -1,5 +1,17 @@
 # Changelog - Process Exporter
 
+## v0.4.0 - Full Feature Set (2026-01-23)
+
+### Changes
+
+- **Synced All Components**: collector.sh, collector.py, exporter.py all at v0.4.0
+- **12-Field Output**: pid, user, cpu_pct, mem_pct, rss_kb, uptime_sec, command, disk_read, disk_write, ports, cgroup_path, runtime
+- **Port Collection**: Uses `lsof` to collect listening ports
+- **Container Metadata**: Regex-based extraction of container_id/name
+- **Instant CPU**: Double-sampling for accurate CPU %
+
+---
+
 ## v0.3.9 - Port Collection (2026-01-23)
 
 ### Changes
