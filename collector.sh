@@ -30,6 +30,21 @@ NOW=$(date +%s)
 # --- UID cache ---
 declare -A UID_MAP
 
+# --- Network collection (PID → port map) ---
+declare -A pid_networks
+# Use ${VAR-default} to allow SUDO_LSOF="" to disable sudo
+SUDO_LSOF=${SUDO_LSOF-sudo}
+
+# Only collect ports if SUDO_LSOF is not explicitly empty
+if [[ -n "$SUDO_LSOF" ]] && $SUDO_LSOF lsof -i -P -n >/dev/null 2>&1; then
+    while read -r _ pid _ _ _ _ _ _ name; do
+        [[ $name == *:* ]] || continue
+        port="${name##*:}"
+        [[ $port =~ ^[0-9]+$ ]] || continue
+        pid_networks[$pid]="${pid_networks[$pid]:-}:$port,"
+    done < <($SUDO_LSOF lsof -i -P -n 2>/dev/null | grep -E 'LISTEN|UDP')
+fi
+
 # --- Phase 1: Snapshot Process Ticks ---
 declare -A PREV_TICKS
 declare -A PREV_PIDS
@@ -197,7 +212,14 @@ for piddir in "$PROC_DIR"/[0-9]*; do
         fi
     fi
 
-    rows+=("$pid\t$user\t$cpu_pct\t$mem_pct\t$rss_kb\t$uptime_sec\t$comm\t$rd\t$wr\t\t${cgroup_path:-/}\t$runtime")
+    # Get ports for this PID
+    ports="${pid_networks[$pid]:-}"
+    # Clean up leading colon
+    ports="${ports#:}"
+    # Remove trailing comma
+    ports="${ports%,}"
+
+    rows+=("$pid\t$user\t$cpu_pct\t$mem_pct\t$rss_kb\t$uptime_sec\t$comm\t$rd\t$wr\t$ports\t${cgroup_path:-/}\t$runtime")
 done
 
 [[ ${#rows[@]} -eq 0 ]] && exit 0

@@ -1,5 +1,15 @@
 # Changelog - Process Exporter
 
+## v0.3.9 - Port Collection (2026-01-23)
+
+### Changes
+
+- **Added Port Collection**: Uses `lsof` to collect listening ports per process
+- **SUDO_LSOF Control**: Set `SUDO_LSOF=""` to disable port collection or run without sudo
+- **Fixed SUDO_LSOF Handling**: Empty value now correctly disables sudo
+
+---
+
 ## v0.3.8 - Stable Release (2026-01-23)
 
 ### Changes
