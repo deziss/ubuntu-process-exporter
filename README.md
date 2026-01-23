@@ -19,6 +19,7 @@ A production-ready Prometheus exporter that collects process metrics from Linux 
 - `exporter.py`: HTTP server that exposes Prometheus metrics for the top 20 processes by memory, CPU, disk read, and disk write.
 
 Data flow:
+
 1. `collector.sh` collects raw data.
 2. `collector.py` processes and enriches with container info.
 3. `exporter.py` aggregates top-N and serves metrics.
@@ -48,15 +49,15 @@ Available labels (all optional via `INCLUDE_LABELS`):
 - `rank`: Rank in top-N list (1-based)
 - `ports`: Network ports (if listening)
 - `container_id`: Container ID (first 12 chars)
-- `container_name`: Container name (truncated to 64 chars)
 - `pod_name`: Kubernetes pod name (truncated to 64 chars)
 - `namespace`: Kubernetes namespace (truncated to 64 chars)
 - `hostname`: Hostname of the system
 
 **Label Normalization**: The exporter automatically normalizes common variations:
+
 - `port` → `ports`
 - `host` → `hostname`
-- `container` → `container_name`
+- `container` → `container_id`
 - `pod` → `pod_name`
 - `ns` → `namespace`
 
@@ -64,30 +65,33 @@ Available labels (all optional via `INCLUDE_LABELS`):
 
 ### Environment Variables
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `METRICS_PORT` | `9105` | Port for metrics endpoint |
-| `SCRAPE_TIMEOUT` | `30` | Timeout for metrics collection (seconds) |
-| `TOP_N` | `50` | Number of top processes to track (⚠️ higher values slow scraping) |
-| `ENABLE_DISK_IO` | `true` | Enable disk I/O metrics collection |
-| `INCLUDE_LABELS` | All labels | Comma-separated list of labels to include |
-| `PROC_DIR` | `/proc` | Path to proc filesystem |
+| Variable         | Default    | Description                                                       |
+| ---------------- | ---------- | ----------------------------------------------------------------- |
+| `METRICS_PORT`   | `9105`     | Port for metrics endpoint                                         |
+| `SCRAPE_TIMEOUT` | `30`       | Timeout for metrics collection (seconds)                          |
+| `TOP_N`          | `50`       | Number of top processes to track (⚠️ higher values slow scraping) |
+| `ENABLE_DISK_IO` | `true`     | Enable disk I/O metrics collection                                |
+| `INCLUDE_LABELS` | All labels | Comma-separated list of labels to include                         |
+| `PROC_DIR`       | `/proc`    | Path to proc filesystem                                           |
 
 ### Dynamic Labels
 
 Control which labels are included in metrics using the `INCLUDE_LABELS` environment variable.
 
 **Default (all labels)**:
+
 ```bash
-INCLUDE_LABELS=pid,user,command,runtime,rank,container_id,container_name,pod_name,namespace,ports,hostname
+INCLUDE_LABELS=pid,user,command,runtime,rank,container_id,pod_name,namespace,ports,hostname
 ```
 
 **Minimal (reduced cardinality)**:
+
 ```bash
-INCLUDE_LABELS=pid,command,container_name,runtime,hostname
+INCLUDE_LABELS=pid,command,container_id,runtime,hostname
 ```
 
 **Label Normalization**: Common typos are automatically corrected:
+
 - Using `port` instead of `ports`? ✅ Auto-corrected
 - Using `host` instead of `hostname`? ✅ Auto-corrected
 - Invalid labels? ⚠️ Logged as warnings and ignored
@@ -112,21 +116,24 @@ docker run -d --name process-exporter \
 
 To include all labels (default), omit the `INCLUDE_LABELS` environment variable.
 
-Available labels: `pid`, `user`, `command`, `runtime`, `rank`, `container_id`, `container_name`, `pod_name`, `namespace`, `ports`, `hostname`
+Available labels: `pid`, `user`, `command`, `runtime`, `rank`, `container_id`, `pod_name`, `namespace`, `ports`, `hostname`
 
 ## Docker Deployment
 
 Build the image:
+
 ```bash
 docker build -t process-exporter .
 ```
 
 Run with docker-compose:
+
 ```bash
 docker-compose up -d
 ```
 
 Or run manually:
+
 ```bash
 docker run -d --name process-exporter \
   --privileged \
@@ -176,7 +183,7 @@ services:
     environment:
       METRICS_PORT: "9105"
       TOP_N: "25"
-      INCLUDE_LABELS: "pid,user,command,runtime,container_id,container_name,ports,hostname"
+      INCLUDE_LABELS: "pid,user,command,runtime,container_id,ports,hostname"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:9105/health"]
@@ -191,9 +198,9 @@ Add to your Prometheus `scrape_configs`:
 
 ```yaml
 scrape_configs:
-  - job_name: 'process-exporter'
+  - job_name: "process-exporter"
     static_configs:
-      - targets: ['localhost:9105']
+      - targets: ["localhost:9105"]
     scrape_interval: 30s
     scrape_timeout: 10s
 ```
@@ -207,6 +214,7 @@ scrape_configs:
 **Cause**: Mismatch between configured labels and actual label names
 
 **Solution**: The exporter now automatically normalizes common variations. Check startup logs:
+
 ```bash
 docker logs <container-name> | grep "Labels (normalized)"
 ```
@@ -218,11 +226,13 @@ If you see warnings about invalid labels, update your `INCLUDE_LABELS` to use co
 **Symptom**: Prometheus performance issues, high memory usage
 
 **Solution**: Reduce label cardinality by limiting `INCLUDE_LABELS`:
+
 ```bash
 INCLUDE_LABELS=pid,command,runtime,hostname  # Minimal set
 ```
 
 Also reduce `TOP_N` to track fewer processes:
+
 ```bash
 TOP_N=10  # Track only top 10 processes
 ```
@@ -232,10 +242,12 @@ TOP_N=10  # Track only top 10 processes
 **Symptom**: Scrapes timing out or taking too long
 
 **Causes**:
+
 - `TOP_N` too high (each additional process adds overhead)
 - `ENABLE_DISK_IO=true` on systems with many processes
 
 **Solutions**:
+
 ```bash
 TOP_N=15                    # Reduce tracked processes
 SCRAPE_TIMEOUT=60          # Increase timeout

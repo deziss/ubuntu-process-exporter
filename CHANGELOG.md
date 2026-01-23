@@ -1,5 +1,15 @@
 # Changelog - Process Exporter
 
+## v0.5.1 - Cleanup Release (2026-01-23)
+
+### Changes
+
+- **Removed `container_name`**: Removed all references to `container_name` to simplify metrics/labels.
+- **Removed `max_pids`**: Removed the limit on the number of processes processed in the collector loop.
+- **Improved Validation**: Updated `deploy.sh` and documentation to reflect changes.
+
+---
+
 ## v0.5.0 - Single-Pass Architecture (2026-01-23)
 
 ### Changes

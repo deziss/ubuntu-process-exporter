@@ -117,7 +117,7 @@ mem_percent() {
 
 for piddir in "$PROC_DIR"/[0-9]*; do
     [[ -d "$piddir" ]] || continue
-    (( ++count > max_pids )) && break
+    # (( ++count > max_pids )) && break
 
     pid="${piddir##*/}"
     

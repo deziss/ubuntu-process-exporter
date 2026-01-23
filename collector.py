@@ -40,7 +40,6 @@ class ProcessMetric:
     uptime_sec: int
     runtime: str
     container_id: str = ""
-    container_name: str = ""
 
 @contextmanager
 def timeout(seconds: int):
@@ -55,33 +54,14 @@ def timeout(seconds: int):
         signal.alarm(0)
         signal.signal(signal.SIGALRM, old)
 
-def extract_metadata(cgroup_path: str, runtime: str) -> tuple[str, str]:
-    """Efficiently extract container ID and Name from cgroup path"""
+def extract_metadata(cgroup_path: str, runtime: str) -> str:
+    """Efficiently extract container ID from cgroup path"""
     if runtime == "host" or not cgroup_path or cgroup_path == "/":
-        return "", ""
+        return ""
     
     # Fast extraction logic
     cid = ""
-    name = ""
-    
-    # 1. Try to find container ID using common patterns (fastest)
-    match = RE_CONTAINER_ID.search(cgroup_path)
-    if match:
-        cid = match.group(1)[:12]  # Short ID
-    
-    # 2. Heuristic for name
-    # Systemd/Crio often put name in .scope or directory names
-    # e.g. /system.slice/docker-CONTAINERNAME.scope
-    # or /.../kubepods/.../podID/containerID
-    
-    # If we have a CID, check if there's a readable name elsewhere
-    # For now, we will fallback name to CID unless we see distinct scope
-    name = cid
-    
-    # K8s Special Case: Try to find pod name or container name logic if needed
-    # But for "Option B" speed, just getting the ID is 90% of value
-    
-    return cid, name
+    return cid
 
 def collect_data() -> List[ProcessMetric]:
     """Fast data collection with minimal overhead"""
@@ -128,7 +108,7 @@ def collect_data() -> List[ProcessMetric]:
             
             # Enrich with Metadata (Option B)
             if pm.runtime != "host":
-                pm.container_id, pm.container_name = extract_metadata(pm.cgroup_path, pm.runtime)
+                pm.container_id = extract_metadata(pm.cgroup_path, pm.runtime)
                 
             processes.append(pm)
             

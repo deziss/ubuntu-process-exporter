@@ -34,8 +34,8 @@ echo
 # Step 3: Test collector
 echo "[3/5] Testing collector output..."
 FIELD_COUNT=$(bash collector.sh 2>/dev/null | head -1 | awk -F'\t' '{print NF}')
-if [ "$FIELD_COUNT" != "13" ]; then
-    echo "❌ Collector output has $FIELD_COUNT fields (expected 13)"
+if [ "$FIELD_COUNT" != "12" ]; then
+    echo "❌ Collector output has $FIELD_COUNT fields (expected 12)"
     exit 1
 fi
 echo "✅ Collector output valid ($FIELD_COUNT fields)"

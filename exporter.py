@@ -35,7 +35,7 @@ HOSTNAME = socket.gethostname()
 # Label configuration
 DEFAULT_LABELS = {
     "pid", "user", "command", "runtime", "rank", 
-    "container_id", "container_name",
+    "container_id",
     "cgroup_path", "ports", "hostname"
 }
 
@@ -113,7 +113,6 @@ class MetricsHandler(BaseHTTPRequestHandler):
                         "runtime": p.runtime,
                         "rank": str(rank),
                         "container_id": p.container_id,
-                        "container_name": p.container_name,
                         "cgroup_path": p.cgroup_path,
                         "ports": p.ports,
                         "hostname": HOSTNAME
