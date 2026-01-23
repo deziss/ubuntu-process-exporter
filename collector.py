@@ -2,10 +2,9 @@
 """
 Ultra-Optimized Process Collector
 
-v0.4.2 - Field Fixes:
-- Empty string for missing ports
-- Empty string for missing cgroup_path (not "/")
-- Proper field ordering
+v0.5.0 - Single-Pass Architecture:
+- 12-field TSV parsing compatible with v0.5.0 collector
+- Improved performance synchronization
 """
 
 import subprocess

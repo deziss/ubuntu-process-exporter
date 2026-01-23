@@ -2,10 +2,10 @@
 """
 Ultra-Optimized Exporter
 
-v0.4.2 - Field Fixes:
-- Empty string for missing values
-- Proper label handling
-- Fast metric updates
+v0.5.0 - Single-Pass Architecture:
+- Single-pass high-performance collection
+- 12-field TSV parsing
+- Pre-built inode map integration
 """
 
 import os

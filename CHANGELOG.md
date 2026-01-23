@@ -1,5 +1,17 @@
 # Changelog - Process Exporter
 
+## v0.5.0 - Single-Pass Architecture (2026-01-23)
+
+### Changes
+
+- **42% Performance Boost**: Execution time reduced from 21.9s to 12.6s
+- **Single-Pass Architecture**: Dropped secondary PID loops and intermediate storage
+- **Pre-Built Inode Map**: Builds TCP/UDP map once before scanning PIDs
+- **Integrated Resolution**: Ports and metadata resolved immediately in the main loop
+- **Memory Efficient**: Removes large `ACTIVE_DATA` array allocation
+
+---
+
 ## v0.4.2 - Field Fixes (2026-01-23)
 
 ### Changes
