@@ -1,5 +1,16 @@
 # Changelog - Process Exporter
 
+## v0.3.7 - Robust CPU Calculation (2026-01-23)
+
+### Changes
+
+- **Fixed CPU Calculation**: Robust double-sampling with proper stat field extraction
+- **Accurate Regex**: Uses `##*)}` to correctly remove pid and command from stat
+- **Container Tested**: Verified in Docker with /host/proc mount
+- **Note**: Idle processes correctly show ~0.00% CPU (this is expected behavior)
+
+---
+
 ## v0.3.6 - Instant CPU & Accuracy (2026-01-22)
 
 ### Changes
