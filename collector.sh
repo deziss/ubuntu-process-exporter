@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 #
-# collector.sh — Ultra-Optimized Process Collector (v0.4.0)
+# collector.sh — Ultra-Optimized Process Collector (v0.4.1)
 #
-# v0.4.0 - Full Feature Set:
-# - Instant CPU via Double Sampling
-# - Port collection via lsof
-# - Container metadata extraction
-# - 12-field TSV output
+# v0.4.1 - High-Performance Architecture:
+# 1. Snapshot CPU ticks
+# 2. Sleep (delta CPU)
+# 3. Scan all PIDs (FAST): cpu, mem, disk → filter inactive → store ACTIVE_PIDS
+# 4. Build inode → port map ONCE
+# 5. Scan ports ONLY for ACTIVE_PIDS
+# 6. Output / sort / export
 #
 
 set -uo pipefail
@@ -17,6 +19,7 @@ FORMAT=${FORMAT:-tsv}
 ENABLE_DISK_IO=${ENABLE_DISK_IO:-true}
 CGROUP_DIR=${CGROUP_DIR:-/sys/fs/cgroup}
 SAMPLE_INTERVAL=${SAMPLE_INTERVAL:-0.5}
+ENABLE_PORTS=${ENABLE_PORTS:-true}
 
 SYS_PROC="/proc"
 [[ -f "$PROC_DIR/stat" ]] && SYS_PROC="$PROC_DIR"
@@ -26,69 +29,42 @@ CLK_TCK=$(getconf CLK_TCK 2>/dev/null || echo 100)
 BOOT_TIME=$(awk '/btime/ {print $2}' "$SYS_PROC/stat" 2>/dev/null || echo 0)
 MEM_TOTAL_KB=$(awk '/MemTotal:/ {print $2}' "$SYS_PROC/meminfo" 2>/dev/null || echo 1)
 NOW=$(date +%s)
+NUM_CORES=$(grep -c ^processor "$SYS_PROC/cpuinfo" 2>/dev/null || echo 1)
 
 # --- UID cache ---
 declare -A UID_MAP
 
-# --- Network collection (PID → port map) ---
-declare -A pid_networks
-# Use ${VAR-default} to allow SUDO_LSOF="" to disable sudo
-SUDO_LSOF=${SUDO_LSOF-sudo}
-
-# Only collect ports if SUDO_LSOF is not explicitly empty
-if [[ -n "$SUDO_LSOF" ]] && $SUDO_LSOF lsof -i -P -n >/dev/null 2>&1; then
-    while read -r _ pid _ _ _ _ _ _ name; do
-        [[ $name == *:* ]] || continue
-        port="${name##*:}"
-        [[ $port =~ ^[0-9]+$ ]] || continue
-        pid_networks[$pid]="${pid_networks[$pid]:-}:$port,"
-    done < <($SUDO_LSOF lsof -i -P -n 2>/dev/null | grep -E 'LISTEN|UDP')
-fi
-
-# --- Phase 1: Snapshot Process Ticks ---
+# ============================================================
+# STEP 1: Snapshot CPU Ticks (T1)
+# ============================================================
 declare -A PREV_TICKS
 declare -A PREV_PIDS
 
-# Get System Total Ticks (T1)
-# /proc/stat: cpu  22312 34 22 12232 ...
 read -r _ user nice system idle iowait irq softirq steal guest guest_nice < "$SYS_PROC/stat"
 TOTAL_T1=$((user + nice + system + idle + iowait + irq + softirq + steal + guest + guest_nice))
 
-# Read all process ticks efficiently
-# We use a glob loop but only read the stat file
 for statfile in "$PROC_DIR"/[0-9]*/stat; do
     [[ -r "$statfile" ]] || continue
-    # Fast read
     read -r line < "$statfile" || continue
     
-    # Extract PID (field 1)
     pid=${line%% *}
-    
-    # Extract ticks using bash string manipulation
-    # Remove up to LAST parenthesis to handle commands with spaces/parens safely
-    # This is tricky in bash. simpler: remove everything before first closing paren?
-    # No, commands can contain closing parens.
-    # Safe way: greedy match from beginning to last closing paren.
-    
-    # Strip comm: "pid (comm) state ..." -> " state ..."
     rest="${line##*)}"
-    
-    # Fields in $rest (starting with space):
-    #  1:state 2:ppid 3:pgrp 4:session 5:tty_nr 6:tpgid 7:flags 8:minflt 9:cminflt 10:majflt 11:cmajflt 12:utime 13:stime ...
-    # We want 12(utime) + 13(stime)
-    
-    # Using read to split is fast
     read -r state ppid pgrp session tty_nr tpgid flags minflt cminflt majflt cmajflt utime stime _ <<< "$rest"
     
     PREV_TICKS[$pid]=$((utime + stime))
     PREV_PIDS[$pid]=1
 done
 
-# --- Sleep ---
+# ============================================================
+# STEP 2: Sleep (Delta CPU)
+# ============================================================
 sleep "$SAMPLE_INTERVAL"
 
-# --- Phase 2: Calculate Delta & Collect Data ---
-rows=()
+# ============================================================
+# STEP 3: Scan All PIDs (FAST) → Filter Inactive → Store ACTIVE_PIDS
+# ============================================================
+declare -A ACTIVE_DATA
+ACTIVE_PIDS=()
 count=0
 max_pids=500
 
@@ -98,7 +74,6 @@ TOTAL_T2=$((user + nice + system + idle + iowait + irq + softirq + steal + guest
 DIFF_TOTAL=$((TOTAL_T2 - TOTAL_T1))
 (( DIFF_TOTAL < 1 )) && DIFF_TOTAL=1
 
-# Helper functions
 mem_percent() {
     local rss_kb=$1
     if (( MEM_TOTAL_KB > 0 )); then
@@ -109,22 +84,20 @@ mem_percent() {
     fi
 }
 
-# Iterate over PIDs again
 for piddir in "$PROC_DIR"/[0-9]*; do
     [[ -d "$piddir" ]] || continue
     (( ++count > max_pids )) && break
 
     pid="${piddir##*/}"
     
-    # Skip if new process (not in snapshot 1) - can't calculate delta
+    # Skip new processes (not in snapshot 1)
     [[ -z "${PREV_PIDS[$pid]:-}" ]] && continue
 
-    # --- Basic file checks ---
+    # Basic file checks
     [[ -r "$piddir/stat" && -r "$piddir/status" && -r "$piddir/statm" && -r "$piddir/comm" ]] || continue
 
-    # --- UID and username ---
-    # Fast Grep for UID
-    uid=$(grep -m1 '^Uid:' "$piddir/status" 2>/dev/null | cut -f2 | tr -d '[:space:]') || continue
+    # UID and username
+    uid=$(awk '/^Uid:/ {print $2; exit}' "$piddir/status" 2>/dev/null) || continue
     [[ -z "$uid" ]] && continue
 
     user="${UID_MAP[$uid]:-}"
@@ -134,15 +107,15 @@ for piddir in "$PROC_DIR"/[0-9]*; do
         UID_MAP[$uid]="$user"
     fi
 
-    # --- Comm ---
+    # Comm
     read -r comm < "$piddir/comm" 2>/dev/null || continue
     [[ -z "$comm" ]] && continue
 
-    # --- RSS in KB ---
+    # RSS in KB
     read -r _ rss_pages _ < "$piddir/statm" 2>/dev/null || continue
     rss_kb=$((rss_pages * 4))
 
-    # --- CPU Delta ---
+    # CPU Delta
     read -r line < "$piddir/stat" || continue
     rest="${line##*)}"
     read -r state ppid pgrp session tty_nr tpgid flags minflt cminflt majflt cmajflt utime stime starttime _ <<< "$rest"
@@ -151,35 +124,19 @@ for piddir in "$PROC_DIR"/[0-9]*; do
     prev_tick=${PREV_TICKS[$pid]:-0}
     diff_proc=$((curr_ticks - prev_tick))
     
-    # If pid repurposed or error, skip
     (( diff_proc < 0 )) && continue
-    
-    # Calculate CPU %: (diff_proc / diff_total) * 100 * (num_cores? No, spread over total)
-    # Actually standard top % is per-core normalized usually, let's stick to simple share of total time * num_cpus? 
-    # Or just share of total ticks?
-    # /proc/stat total includes ALL cpus.
-    # So (proc / total) * 100 * NUM_CORES is standard "top" behavior (e.g. can go > 100%)
-    # OR (proc / total) * 100 is "share of system capacity".
-    
-    # Process Exporter usually expects 0-100% per core.
-    # Wait, TOTAL_T2 - TOTAL_T1 is sum of ticks across ALL CPUs.
-    # So if we have 4 cores, we have 400 ticks per second total? No, HZ * Cores.
-    # So: (diff_proc / diff_total) * 100 * Num_Cores.
-    # Let's count cores.
-    NUM_CORES=$(grep -c ^processor "$SYS_PROC/cpuinfo" 2>/dev/null || echo 1)
     
     pct_int=$(( diff_proc * 10000 * NUM_CORES / DIFF_TOTAL ))
     cpu_pct=$(printf "%d.%02d" $((pct_int/100)) $((pct_int%100)))
 
     # Uptime
-    # starttime is in jiffies after boot
-    # Boot time is in seconds
-    uptime_sec=$(( NOW - BOOT_TIME - starttime / CLK_TCK ))
+    start_sec=$((BOOT_TIME + starttime / CLK_TCK))
+    uptime_sec=$((NOW - start_sec))
     (( uptime_sec < 0 )) && uptime_sec=0
 
     mem_pct=$(mem_percent "$rss_kb")
 
-    # --- Disk I/O ---
+    # Disk I/O
     rd=0 wr=0
     if [[ "$ENABLE_DISK_IO" == "true" && -r "$piddir/io" ]]; then
         while IFS=': ' read -r key val; do
@@ -190,10 +147,10 @@ for piddir in "$PROC_DIR"/[0-9]*; do
         done < "$piddir/io" 2>/dev/null
     fi
 
-    # Skip zero processes (Active filter)
+    # --- FILTER INACTIVE ---
     [[ "$cpu_pct" == "0.00" && "$rss_kb" -eq 0 && "$rd" -eq 0 && "$wr" -eq 0 ]] && continue
 
-    # --- Cgroup parsing ---
+    # Cgroup parsing
     cgroup_path="/" runtime="host"
     if [[ -r "$piddir/cgroup" ]]; then
         read -r cgline < "$piddir/cgroup" 2>/dev/null
@@ -212,19 +169,85 @@ for piddir in "$PROC_DIR"/[0-9]*; do
         fi
     fi
 
-    # Get ports for this PID
-    ports="${pid_networks[$pid]:-}"
-    # Clean up leading colon
-    ports="${ports#:}"
-    # Remove trailing comma
-    ports="${ports%,}"
-
-    rows+=("$pid\t$user\t$cpu_pct\t$mem_pct\t$rss_kb\t$uptime_sec\t$comm\t$rd\t$wr\t$ports\t${cgroup_path:-/}\t$runtime")
+    # Store active PID data
+    ACTIVE_PIDS+=("$pid")
+    ACTIVE_DATA[$pid]="$user\t$cpu_pct\t$mem_pct\t$rss_kb\t$uptime_sec\t$comm\t$rd\t$wr\t$cgroup_path\t$runtime"
 done
 
-[[ ${#rows[@]} -eq 0 ]] && exit 0
+[[ ${#ACTIVE_PIDS[@]} -eq 0 ]] && exit 0
 
-# --- Output ---
+# ============================================================
+# STEP 4: Build Inode → Port Map ONCE
+# ============================================================
+declare -A INODE_PORT
+
+if [[ "$ENABLE_PORTS" == "true" ]]; then
+    # Parse /proc/net/tcp (LISTEN = state 0A)
+    while read -r sl local rem st _ _ _ _ _ inode _; do
+        [[ "$st" == "0A" ]] || continue
+        port=$((16#${local##*:}))
+        INODE_PORT[$inode]=$port
+    done < <(tail -n +2 "$SYS_PROC/net/tcp" 2>/dev/null)
+
+    # Parse /proc/net/tcp6
+    while read -r sl local rem st _ _ _ _ _ inode _; do
+        [[ "$st" == "0A" ]] || continue
+        port=$((16#${local##*:}))
+        INODE_PORT[$inode]=$port
+    done < <(tail -n +2 "$SYS_PROC/net/tcp6" 2>/dev/null)
+
+    # Parse /proc/net/udp
+    while read -r sl local rem st _ _ _ _ _ inode _; do
+        port=$((16#${local##*:}))
+        INODE_PORT[$inode]=$port
+    done < <(tail -n +2 "$SYS_PROC/net/udp" 2>/dev/null)
+
+    # Parse /proc/net/udp6
+    while read -r sl local rem st _ _ _ _ _ inode _; do
+        port=$((16#${local##*:}))
+        INODE_PORT[$inode]=$port
+    done < <(tail -n +2 "$SYS_PROC/net/udp6" 2>/dev/null)
+fi
+
+# ============================================================
+# STEP 5: Scan Ports ONLY for ACTIVE_PIDS
+# ============================================================
+get_ports_for_pid() {
+    local pid=$1
+    local ports=()
+    local fd_dir="$PROC_DIR/$pid/fd"
+    
+    [[ -d "$fd_dir" ]] || return
+    
+    for fd in "$fd_dir"/*; do
+        link=$(readlink "$fd" 2>/dev/null) || continue
+        [[ $link =~ socket:\[([0-9]+)\] ]] || continue
+        local inode=${BASH_REMATCH[1]}
+        [[ -n "${INODE_PORT[$inode]:-}" ]] && ports+=("${INODE_PORT[$inode]}")
+    done
+    
+    ((${#ports[@]})) && printf "%s" "$(IFS=,; echo "${ports[*]}")"
+}
+
+rows=()
+for pid in "${ACTIVE_PIDS[@]}"; do
+    data="${ACTIVE_DATA[$pid]}"
+    
+    # Get ports for this PID
+    if [[ "$ENABLE_PORTS" == "true" ]]; then
+        ports=$(get_ports_for_pid "$pid")
+    else
+        ports=""
+    fi
+    
+    IFS=$'\t' read -r user cpu_pct mem_pct rss_kb uptime_sec comm rd wr cgroup_path runtime <<< "$data"
+    
+    rows+=("$pid\t$user\t$cpu_pct\t$mem_pct\t$rss_kb\t$uptime_sec\t$comm\t$rd\t$wr\t$ports\t$cgroup_path\t$runtime")
+done
+
+# ============================================================
+# STEP 6: Output / Sort / Export
+# ============================================================
 set +o pipefail
 if [[ $FORMAT == json ]]; then
     printf "%b\n" "${rows[@]}" \

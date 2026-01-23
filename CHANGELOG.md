@@ -1,5 +1,20 @@
 # Changelog - Process Exporter
 
+## v0.4.1 - High-Performance Port Scanning (2026-01-23)
+
+### Changes
+
+- **Removed lsof dependency**: Uses `/proc/net` for 10-50x faster port scanning
+- **Two-phase pipeline**: Cheap metrics first, expensive port scan only for active PIDs
+- **Early filtering**: Skips inactive processes before port resolution
+- **Architecture**: 1)CPU snapshot → 2)Sleep → 3)Scan&Filter → 4)Build inode map → 5)Port scan → 6)Output
+
+### New Env Vars
+
+- `ENABLE_PORTS`: Set to `false` to disable port collection entirely
+
+---
+
 ## v0.4.0 - Full Feature Set (2026-01-23)
 
 ### Changes
