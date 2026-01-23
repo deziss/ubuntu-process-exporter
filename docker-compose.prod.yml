@@ -2,7 +2,7 @@
 
 services:
   ubuntu-process-exporter:
-    image: deziss/ubuntu-process-exporter:v0.5.3
+    image: deziss/ubuntu-process-exporter:v0.5.4
     privileged: true
     pid: host
     network_mode: host  ## if it is 'host' comment ports
@@ -17,6 +17,7 @@ services:
       PROC_DIR: "/proc"
       METRICS_PORT: "9105"
       SCRAPE_TIMEOUT: "300"
+      COLLECTOR_TIMEOUT: "60"
       TOP_N: "25"
       INCLUDE_LABELS: "pid,user,command,runtime,container_id,ports,hostname"
       # Optional: Set INCLUDE_LABELS to control which labels are included in metrics

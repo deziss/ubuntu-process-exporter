@@ -96,6 +96,8 @@ sleep "$SAMPLE_INTERVAL"
 # ============================================================
 count=0
 # Use a newline-delimited buffer for fast sorting: pid user cpu mem rss uptime comm rd wr
+metric_buffer=""
+
 # System Total T2
 read -r _ user nice system idle iowait irq softirq steal guest guest_nice < "$SYS_PROC/stat"
 TOTAL_T2=$((user + nice + system + idle + iowait + irq + softirq + steal + guest + guest_nice))
@@ -113,8 +115,6 @@ mem_percent() {
     fi
 }
 
-# Use a newline-delimited buffer for fast sorting: pid user cpu mem rss uptime comm rd wr
-metric_buffer=$(
 for piddir in "$PROC_DIR"/[0-9]*; do
     [[ -d "$piddir" ]] || continue
     pid="${piddir##*/}"
@@ -174,8 +174,8 @@ for piddir in "$PROC_DIR"/[0-9]*; do
     [[ "$cpu_pct" == "0.00" && "$rss_kb" -eq 0 && "$rd" -eq 0 && "$wr" -eq 0 ]] && continue
 
     # Add to buffer: pid cpu mem_pct rss uptime rd wr
-    printf "%s%s%s%s%s%s%s%s%s%s%s%s%s\n" "$pid" "$TAB" "$cpu_pct" "$TAB" "$mem_pt" "$TAB" "$rss_kb" "$TAB" "$uptime_sec" "$TAB" "$rd" "$TAB" "$wr"
-done)
+    metric_buffer+="$pid$TAB$cpu_pct$TAB$mem_pt$TAB$rss_kb$TAB$uptime_sec$TAB$rd$TAB$wr"$'\n'
+done
 
 # ============================================================
 # STEP 4: Selection (Union Top N)

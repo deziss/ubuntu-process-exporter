@@ -1,5 +1,15 @@
 # Changelog - Process Exporter
 
+## v0.5.4 - Timeout Fixes (2026-01-23)
+
+### Changes
+
+- **Timeout Configuration**: Added `COLLECTOR_TIMEOUT` env var (default 30s) to `docker-compose` files (set to 60s).
+- **Collector Optimization**: Optimized `collector.sh` output buffering to reduce Phase 1 latency.
+- **Reliability**: Restored missing helper functions in `collector.sh`.
+
+---
+
 ## v0.5.3 - Two-Pass Optimization (2026-01-23)
 
 ### Changes

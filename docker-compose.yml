@@ -21,6 +21,7 @@ services:
       PROC_DIR: /proc
       METRICS_PORT: "9106"
       SCRAPE_TIMEOUT: "300"
+      COLLECTOR_TIMEOUT: "60"
       TOP_N: "25" ## if this increase then metrics scrapping gone slow respectively
       ENABLE_DISK_IO: "true"
       # Label control (OPTIONAL)
