@@ -3,19 +3,23 @@
 ## Summary of Changes
 
 ### 1. **collector.sh** - Enhanced Cgroup Detection & Collection
+
 **New Features:**
+
 - Automatic cgroup v1 and v2 detection
 - Separate cgroup version reporting
 - Improved container runtime detection (docker, containerd, kubernetes, podman, lxc, systemd)
 - TSV output now includes 3 new fields
 
 **New Output Format (TSV):**
+
 ```
 pid    user    cpu_pct    mem_pct    rss_kb    uptime_sec    command    disk_read    disk_write    ports    cgroup_path    cgroup_version    container_runtime
 1234   root    5.23       2.14       102400    3600          bash       1024         512          8080     /docker/abc    v2                 docker
 ```
 
 **Key Changes:**
+
 - `parse_cgroup_path()` function now handles both v1 and v2 formats
   - v2: Single line format `0::/path/to/cgroup`
   - v1: Multiple lines, intelligently picks container-related paths
@@ -27,6 +31,7 @@ pid    user    cpu_pct    mem_pct    rss_kb    uptime_sec    command    disk_rea
 ### 2. **collector.py** - Updated Data Parsing
 
 **Updated ProcessMetric Dataclass:**
+
 ```python
 @dataclass
 class ProcessMetric:
@@ -35,12 +40,14 @@ class ProcessMetric:
 ```
 
 **Updated Data Collection Logic:**
+
 - Now expects 13 fields instead of 11 (backwards incompatible)
 - Directly uses `cgroup_version` and `runtime` from collector.sh
 - Reduced redundant detection code - shifts logic to shell script
 - Still maintains backup `extract_container_id()` for metadata resolution
 
 **TSV Parsing:**
+
 ```python
 # Old: 11 fields
 pid, user, pcpu, pmem, rss, etimes, comm, disk_read, disk_write, ports, cgroup_path = parts[:11]
@@ -54,14 +61,17 @@ pid, user, pcpu, pmem, rss, etimes, comm, disk_read, disk_write, ports, cgroup_p
 ### 3. **exporter.py** - Enhanced Metrics & Labels
 
 **Updated VALID_LABELS:**
+
 - Added `cgroup_version` to available labels
 - Can be included in INCLUDE_LABELS environment variable
 
 **Updated labels_for() Function:**
+
 - Now maps `cgroup_version` field from ProcessMetric
 - Values: `"v1"`, `"v2"`, or `"unknown"`
 
 **Usage Example:**
+
 ```bash
 # Include cgroup_version in metrics labels
 export INCLUDE_LABELS="pid,user,command,runtime,cgroup_version,container_id"
@@ -93,6 +103,7 @@ exporter.py (expose Prometheus metrics)
 ## Cgroup Version Detection
 
 ### In collector.sh:
+
 ```bash
 detect_cgroup_version() {
     if [[ -f "$CGROUP_DIR/cgroup.controllers" ]]; then
@@ -108,12 +119,14 @@ detect_cgroup_version() {
 ### Cgroup Path Parsing:
 
 **Cgroup v2** (unified hierarchy):
+
 ```
 Single line format: 0::/path/to/cgroup
 Example: 0::/docker/abc123...
 ```
 
 **Cgroup v1** (multiple hierarchies):
+
 ```
 Format: hier:subsystems:path
 Example:
@@ -129,12 +142,14 @@ Example:
 ⚠️ **Breaking Change**: collector.sh now outputs 13 fields instead of 11
 
 **Migration Path:**
+
 1. Update collector.sh to latest version
 2. Update collector.py (parse 13 fields instead of 11)
 3. Update exporter.py (add `cgroup_version` to labels)
 4. Restart exporter container
 
 If using standalone collector.sh:
+
 - Ensure scripts expecting TSV output are updated to handle 3 new fields
 - Add new fields to any parsing logic
 
@@ -143,18 +158,21 @@ If using standalone collector.sh:
 ## Testing
 
 ### Test collector.sh output:
+
 ```bash
 bash collector.sh | head -2
 # Output should have 13 tab-separated fields
 ```
 
 ### Test JSON format:
+
 ```bash
 FORMAT=json bash collector.sh | jq '.[] | keys'
 # Should include: cgroup_path, cgroup_version, container_runtime
 ```
 
 ### Test exporter metrics:
+
 ```bash
 curl http://localhost:9106/metrics | grep upm_process
 # Labels should include cgroup_version if configured
@@ -166,17 +184,18 @@ curl http://localhost:9106/metrics | grep upm_process
 
 ### Environment Variables:
 
-| Variable | Default | Notes |
-|----------|---------|-------|
-| `CGROUP_DIR` | `/sys/fs/cgroup` | Override if cgroups mounted elsewhere |
-| `PROC_DIR` | `/proc` | Process filesystem path |
-| `TOP_N` | `50` | Number of top processes to collect |
-| `FORMAT` | `tsv` | Output format: `tsv` or `json` |
-| `INCLUDE_LABELS` | (all labels) | Comma-separated list of labels to include |
+| Variable         | Default          | Notes                                     |
+| ---------------- | ---------------- | ----------------------------------------- |
+| `CGROUP_DIR`     | `/sys/fs/cgroup` | Override if cgroups mounted elsewhere     |
+| `PROC_DIR`       | `/proc`          | Process filesystem path                   |
+| `TOP_N`          | `50`             | Number of top processes to collect        |
+| `FORMAT`         | `tsv`            | Output format: `tsv` or `json`            |
+| `INCLUDE_LABELS` | (all labels)     | Comma-separated list of labels to include |
 
 ### Example with cgroup_version label:
+
 ```bash
-export INCLUDE_LABELS="pid,user,command,runtime,cgroup_version,container_id,container_name,ports"
+export INCLUDE_LABELS="pid,user,command,runtime,cgroup_version,container_id,ports"
 export CGROUP_DIR=/sys/fs/cgroup
 docker-compose up --build
 ```
@@ -186,6 +205,7 @@ docker-compose up --build
 ## Metrics with Cgroup Version
 
 Example Prometheus metrics:
+
 ```
 # HELP upm_process_top_memory_bytes Top processes by RSS memory (bytes)
 # TYPE upm_process_top_memory_bytes gauge
@@ -199,16 +219,19 @@ upm_process_top_memory_bytes{cgroup_version="v1",command="nginx",hostname="node2
 ## Troubleshooting
 
 ### "13 fields expected, got 11"
+
 - Update collector.sh to latest version
 - Ensure collector.py is updated
 - Check: `bash collector.sh | head -1 | awk -F'\t' '{print NF}'` should output `13`
 
 ### cgroup_version shows "unknown"
+
 - Check if /sys/fs/cgroup is accessible
 - Verify cgroup mount: `mount | grep cgroup`
 - May happen in restricted containers (use privileged: true in docker-compose)
 
 ### Runtime always shows "host"
+
 - Ensure /proc/PID/cgroup is readable
 - In Docker, mount /proc from host: `-v /proc:/host/proc:ro`
 - Update PROC_DIR if /proc is mounted differently

@@ -37,7 +37,7 @@
 
 ### Changes
 
-- **Removed `container_name`**: Removed all references to `container_name` to simplify metrics/labels.
+- **Removed Container Name**: Removed all references to container names to simplify metrics/labels.
 - **Removed `max_pids`**: Removed the limit on the number of processes processed in the collector loop.
 - **Improved Validation**: Updated `deploy.sh` and documentation to reflect changes.
 
@@ -139,7 +139,7 @@
 
 ### Changes
 
-- **Restored `container_id` & `container_name`**: Implemented high-performance regex extraction from cgroup paths (Option B)
+- **Restored `container_id`**: Implemented high-performance regex extraction from cgroup paths (Option B)
 - **Zero Overhead**: No external Docker/Containerd socket calls
 - **Compatible**: Works with Docker, K8s (CRI-O/Containerd), and Systemd scopes
 
