@@ -24,6 +24,7 @@ services:
       COLLECTOR_TIMEOUT: "60"
       TOP_N: "25" ## if this increase then metrics scrapping gone slow respectively
       ENABLE_DISK_IO: "true"
+      ENABLE_PORTS: "true"
       # Label control (OPTIONAL)
       # INCLUDE_LABELS: pid,command,runtime,hostname,ports
 

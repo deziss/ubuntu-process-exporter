@@ -92,10 +92,11 @@ done
 sleep "$SAMPLE_INTERVAL"
 
 # ============================================================
-# STEP 3: Phase 1 - Fast Scan (Filter)
+# STEP 3: Single efficient pass (Collect + Filter + Resolve)
 # ============================================================
+rows=()
 count=0
-# Use a newline-delimited buffer for fast sorting: pid user cpu mem rss uptime comm rd wr
+
 # System Total T2
 read -r _ user nice system idle iowait irq softirq steal guest guest_nice < "$SYS_PROC/stat"
 TOTAL_T2=$((user + nice + system + idle + iowait + irq + softirq + steal + guest + guest_nice))
@@ -113,23 +114,17 @@ mem_percent() {
     fi
 }
 
-# Use a newline-delimited buffer for fast sorting: pid user cpu mem rss uptime comm rd wr
-metric_buffer=$(
 for piddir in "$PROC_DIR"/[0-9]*; do
     [[ -d "$piddir" ]] || continue
+    # (( ++count > 500 )) && break # Optional safety, currently unlimited
+
     pid="${piddir##*/}"
     
     # 1. Skip new processes (must exist in snapshot 1 for delta CPU)
     [[ -z "${PREV_PIDS[$pid]:-}" ]] && continue
 
-    # 2. Check minimal files (stat, statm, comm)
-    # Note: 'status' is expensive (for uid), we defer it. But we need 'comm' for context maybe?
-    # Actually, let's defer 'comm' and 'uid' too if possible.
-    # But wait, we need User/Command to potentially filter? (Though current filter is resource-only).
-    # Current filter is: cpu > 0 || rss > 0 || disk > 0
-    # So we ONLY need cpu, mem, disk in Phase 1.
-    
-    [[ -r "$piddir/stat" && -r "$piddir/statm" ]] || continue
+    # 2. Check minimal files
+    [[ -r "$piddir/stat" && -r "$piddir/statm" && -r "$piddir/comm" ]] || continue
 
     # 3. CPU Delta (stat)
     if read -r line < "$piddir/stat"; then
@@ -157,7 +152,7 @@ for piddir in "$PROC_DIR"/[0-9]*; do
     read -r _ rss_pages _ < "$piddir/statm" 2>/dev/null || continue
     rss_kb=$((rss_pages * 4))
     
-    # 5. Disk I/O (io) - Check file existence first
+    # 5. Disk I/O (io)
     rd=0 wr=0
     if [[ "$ENABLE_DISK_IO" == "true" && -r "$piddir/io" ]]; then
         while IFS=': ' read -r key val; do
@@ -171,51 +166,14 @@ for piddir in "$PROC_DIR"/[0-9]*; do
     mem_pt=$(mem_percent "$rss_kb")
 
     # 6. EARLY FILTER - Skip inactive
+    # Drop if CPU=0, RSS=0, Disk=0
     [[ "$cpu_pct" == "0.00" && "$rss_kb" -eq 0 && "$rd" -eq 0 && "$wr" -eq 0 ]] && continue
 
-    # Add to buffer: pid cpu mem_pct rss uptime rd wr
-    printf "%s%s%s%s%s%s%s%s%s%s%s%s%s\n" "$pid" "$TAB" "$cpu_pct" "$TAB" "$mem_pt" "$TAB" "$rss_kb" "$TAB" "$uptime_sec" "$TAB" "$rd" "$TAB" "$wr"
-done)
+    # =========================================================
+    # ENRICHMENT (Immediate)
+    # =========================================================
 
-# ============================================================
-# STEP 4: Selection (Union Top N)
-# ============================================================
-
-# Sort buffer to find interesting PIDs
-top_cpu=$(echo -n "$metric_buffer" | sort -t"$TAB" -k2,2nr | head -n "$TOP_N")
-top_mem=$(echo -n "$metric_buffer" | sort -t"$TAB" -k4,4nr | head -n "$TOP_N")
-top_io=$(echo -n "$metric_buffer"  | sort -t"$TAB" -k6,6nr -k7,7nr | head -n "$TOP_N")
-
-# Combine unique PIDs
-# TARGET_PIDS is an associative array for O(1) lookups
-declare -A TARGET_PIDS
-declare -A PID_METRICS
-
-# Helper to process lists
-process_list() {
-    while IFS="$TAB" read -r pid cpu mem rss up rd wr; do
-        [[ -n "$pid" ]] || continue
-        TARGET_PIDS[$pid]=1
-        PID_METRICS[$pid]="$cpu$TAB$mem$TAB$rss$TAB$up$TAB$rd$TAB$wr"
-    done <<< "$1"
-}
-
-process_list "$top_cpu"
-process_list "$top_mem"
-process_list "$top_io"
-
-# ============================================================
-# STEP 5: Phase 2 - Enrichment (Only Top N)
-# ============================================================
-rows=()
-for pid in "${!TARGET_PIDS[@]}"; do
-    piddir="$PROC_DIR/$pid"
-    [[ -d "$piddir" ]] || continue
-
-    # Retrieve metrics
-    IFS="$TAB" read -r cpu_pct mem_pct rss_kb uptime_sec rd wr <<< "${PID_METRICS[$pid]}"
-    
-    # 1. User (Deferred)
+    # 7. UID / User
     uid=$(awk '/^Uid:/ {print $2; exit}' "$piddir/status" 2>/dev/null)
     user="${UID_MAP[$uid]:-}"
     if [[ -z "$user" ]]; then
@@ -224,10 +182,10 @@ for pid in "${!TARGET_PIDS[@]}"; do
         UID_MAP[$uid]="$user"
     fi
 
-    # 2. Command (Deferred)
+    # 8. Command
     read -r comm < "$piddir/comm" 2>/dev/null || comm="(unknown)"
 
-    # 3. Cgroup (Deferred)
+    # 9. Cgroup
     cgroup_path="" runtime="host"
     if [[ -r "$piddir/cgroup" ]]; then
         while IFS=: read -r _ _ path; do
@@ -248,7 +206,7 @@ for pid in "${!TARGET_PIDS[@]}"; do
         */user.slice*|*/system.slice*) runtime="systemd" ;;
     esac
 
-    # 4. Ports (Deferred)
+    # 10. Ports
     ports_str=""
     if [[ "$ENABLE_PORTS" == "true" && -d "$piddir/fd" ]]; then
         ports_array=()
@@ -263,15 +221,22 @@ for pid in "${!TARGET_PIDS[@]}"; do
     fi
 
     # Add Row
-    rows+=("$pid$TAB$user$TAB$cpu_pct$TAB$mem_pct$TAB$rss_kb$TAB$uptime_sec$TAB$comm$TAB$rd$TAB$wr$TAB$ports_str$TAB$cgroup_path$TAB$runtime")
+    rows+=("$pid$TAB$user$TAB$cpu_pct$TAB$mem_pt$TAB$rss_kb$TAB$uptime_sec$TAB$comm$TAB$rd$TAB$wr$TAB$ports_str$TAB$cgroup_path$TAB$runtime")
 done
 
-# Sort final output
-final_output=$(printf "%s\n" "${rows[@]}" | sort -t"$TAB" -k3,3nr -k4,4nr)
+[[ ${#rows[@]} -eq 0 ]] && exit 0
 
+# ============================================================
+# OUTPUT
+# ============================================================
+set +o pipefail
 if [[ $FORMAT == json ]]; then
-    printf "%s\n" "$final_output" \
+    printf "%b\n" "${rows[@]}" \
+    | sort -t"$TAB" -k3,3nr -k4,4nr \
+    | head -n "$TOP_N" \
     | jq -R 'split("\t") | {pid:.[0]|tonumber,user:.[1],cpu_pct:.[2]|tonumber?,mem_pct:.[3]|tonumber?,rss_kb:.[4]|tonumber?,uptime_sec:.[5]|tonumber?,command:.[6],disk_read_bytes:.[7]|tonumber?,disk_write_bytes:.[8]|tonumber?,ports:.[9],cgroup_path:.[10],runtime:.[11]}'
 else
-    printf "%s\n" "$final_output"
+    printf "%b\n" "${rows[@]}" \
+    | sort -t"$TAB" -k3,3nr -k4,4nr \
+    | head -n "$TOP_N"
 fi

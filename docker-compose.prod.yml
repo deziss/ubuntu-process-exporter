@@ -2,7 +2,7 @@
 
 services:
   ubuntu-process-exporter:
-    image: deziss/ubuntu-process-exporter:v0.5.4
+    image: deziss/ubuntu-process-exporter:v0.5.5
     privileged: true
     pid: host
     network_mode: host  ## if it is 'host' comment ports
@@ -14,7 +14,9 @@ services:
       - /disk1/docker/containers:/var/lib/docker/containers:ro
       - upm-cache:/tmp/upm
     environment:
-      PROC_DIR: "/proc"
+      PROC_DIR: "/host/proc"
+      ENABLE_DISK_IO: "true"
+      ENABLE_PORTS: "true"
       METRICS_PORT: "9105"
       SCRAPE_TIMEOUT: "300"
       COLLECTOR_TIMEOUT: "60"

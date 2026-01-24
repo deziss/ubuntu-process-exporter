@@ -162,7 +162,7 @@ class MetricsHandler(BaseHTTPRequestHandler):
 
 def run():
     server = HTTPServer(('0.0.0.0', METRICS_PORT), MetricsHandler)
-    log.info(f"UPM Exporter v0.5.4 started on port {METRICS_PORT}")
+    log.info(f"UPM Exporter v0.5.5 started on port {METRICS_PORT}")
     
     def stop(*args):
         server.server_close()

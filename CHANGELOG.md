@@ -1,5 +1,15 @@
 # Changelog - Process Exporter
 
+## v0.5.5 - Single-Pass Rollback (2026-01-24)
+
+### Changes
+
+- **Rollback to Single-Pass Architecture**: Reverted to the logic of v0.5.0 as it proved faster and more reliable in user environments than the Two-Pass approach.
+- **Port Control**: Added `ENABLE_PORTS` (default: true) to `docker-compose.yml`. Set to `false` to disable expensive port monitoring.
+- **Stability**: Restored the simple, robust loop logic that resolves all metadata in one linear pass.
+
+---
+
 ## v0.5.4 - Timeout Fixes (2026-01-23)
 
 ### Changes
